@@ -32,6 +32,7 @@ int platform_init(ExenVM *vm, const ExenConfig *cfg)
     graphics_register();
     resource_register();
     gamelet_register();
+    playfield_register();
     return 0;
 }
 

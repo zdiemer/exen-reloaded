@@ -315,16 +315,16 @@ Decompilations: `natives/Resource.c.txt`, `AnimBitmap.c.txt`, `PlayField.c.txt`,
 | 40 | Resource.readString(I)LString; | 0x4295df | skips k strings separated by 0xFF, returns the next one (up to 0xFF or the end). `_offset` is **not** advanced | high |
 | 41 | Resource.getNbResources()I (static) | 0x4297fa | N (the `.exn` value at 0x34) | high |
 | 42 | Resource.getResourceType()I | 0x429813 | `types[_id]`, or 0 if out of range | high |
-| 43 | AnimBitmap.draw(Graphics,x,y,frame,transform)V | 0x42469c | frame -> rect, then blit to `g`. WITHMASK: the mask is the same rect shifted by image.width/2, blitted first. Mode codes 3 then 4 (inverse video: 4 then 3) | high |
+| 43 | AnimBitmap.draw(Graphics,x,y,frame,transform)V | 0x42469c | frame -> rect, then blit to `g`. WITHMASK: the mask is the same rect shifted by image.width/2, blitted first. Mode codes 3 then 4 (inverse video: 4 then 3), which have **no effect**: drawImageCore 0x418008 passes the mode only to the source's setPaintMode slot (ops+0x30), a stub returning 1 in both vtables (8bpp 0x42c351 -> hook `[0x457f38]` = 0x42d463 `return 1`). So the mask is drawn through the source's own blit mode like any image | high |
 | 44 | AnimBitmap.moduloFrame(I)I | 0x4245fe | positive `f mod (frameSequence.length or nbFrame)` | high |
 | 45 | AnimBitmap.getRealFrame(I)I | 0x42467b | through frameSequence (if any), then mod nbFrame | high |
 | 46 | PlayField.fillCells(cx,cy,w,h,v)V | 0x427013 | rect clipped to the map, fill with v | high |
-| 47 | PlayField.moveTiles(sx,sy,dx,dy,w,h)V | 0x42712f | overlap-safe block move of cells, clipped on both sides | high/med |
-| 48 | PlayField.draw(Graphics,x,y)V | 0x427531 | draws tiles in the view window, then z-sorted sprites. See below | high |
+| 47 | PlayField.moveTiles(x1,y1,x2,y2,w,h)V | 0x42712f | **Broken in gensimu.** Clips both rects against the map and picks one of 4 loop directions (jump table 0x427521, case = (x2<x1)*2 + (y2<y1)), but every loop body is `cellSet(x1, j, cellGet(x2, j))` with j = 0..h-1: the column/row counters are never added to the coordinates and the y arguments are unused after clipping. Net effect: column x2 rows [0,h) is copied to column x1, w times. No game in the corpus calls it | high |
+| 48 | PlayField.draw(Graphics,x,y)V | 0x427531 | draws tiles in the view window, then z-sorted sprites. See below. charSet or target image without native data: log and **fatal** 0x407a13(0) | high |
 | 49 | PlayField.setCellTile(cx,cy,v)V | 0x426fa8 | bounds-checked store. Negative v becomes `v+(1<<nbBits)` | high |
 | 50 | PlayField.getCellTile(cx,cy)I | 0x426f37 | bounds-checked load. Values >= `(1<<nbBits)-animTileMaxIndex` come back negative. 0 if out of range | high |
-| 51 | PlayField.addSprite(Sprite)V | 0x427f95 | appends at the tail. Already linked: log and ignore. null: throw | high |
-| 52 | PlayField.removeSprite(Sprite)V | 0x4280bd | unlinks. Not in the list: log | high |
+| 51 | PlayField.addSprite(Sprite)V | 0x427f95 | appends at the tail. Already linked (next or prev set): log and ignore; a sprite alone in a list has neither and is re-linked as the only element. null: log and **fatal** 0x407a13(0) | high |
+| 52 | PlayField.removeSprite(Sprite)V | 0x4280bd | unlinks (searching from firstSprite by next). Not in the list: log. null: log and fatal 0x407a13(0) | high |
 | 53 | PlayField.removeAllSprite()V | 0x428208 | clears every link, first=last=null | high |
 | 54 | AnimFlash.initAnimFlash(B[])I | 0x4248b0 | stub, returns 0 | high |
 | 55 | AnimFlash.draw(Graphics,Z)V | 0x4248c2 | stub (no-op) | high |
@@ -338,7 +338,7 @@ Decompilations: `natives/Resource.c.txt`, `AnimBitmap.c.txt`, `PlayField.c.txt`,
 | 63 | AnimFlash.getWidth(I)I | 0x424916 | returns field `width` (+0x24), ignores the arg | high |
 | 64 | AnimFlash.getHeight(I)I | 0x42492a | returns field `height` (+0x28) | high |
 | 65 | Displayable.haveDisplayableCommand()Z | 0x424a60 | `cmdpos(0)` or `cmdpos(1)` (0x403f56 maps 0->2, 1->1), so it is **always true** in gensimu | high |
-| 66 | Displayable.drawCommand(Graphics,String label,int pos)V | 0x424a9d | Temporarily sets the dst image clip to the full image (0,0,w,h). Then 0x4238f0 draws the label with the global font `G+0xc`: y = img.h - font.height(). x comes from `cmdpos(pos)`: 1 -> font op +0x20, 2 -> font op +0x1c (one is left-aligned, the other right-aligned), 3 -> x=1, 0 -> not drawn. The text goes through font op +0xc. Clip restored afterwards | med |
+| 66 | Displayable.drawCommand(Graphics,String label,int pos)V | 0x424a9d | Temporarily sets the dst EXimg clip to the full image (0,0,w,h); the Graphics clip is not used. Then 0x4238f0(chars, len, img, pos) draws the label with the built-in font (`[0x45ff3c]+0xc`) in **colour 0**: y = img.h - 9 (font op +4, glyphH), n = min(img.w/6, len) (op +0x18), nothing if n < 1 or y < 0. x by `cmdpos(pos)` through jump table 0x4239e3: 1 -> x = 1 (left), 2 -> op +0x20 = img.w - n*6 (right), 3 -> op +0x1c = (img.w - n*6)/2 (centre, unreachable), 0 -> not drawn. So pos 0 is right-aligned and pos 1 left-aligned. Text via drawText (op +0xc). Clip restored afterwards. A null label is dereferenced | high |
 | 101 | DialogBox.getNbLinesFormatted(String,width)I | 0x424940 | 0x423174 -> 0x40356e (manuf UI shim) -> 0x4231db: number of word-wrapped lines of text at that width | med |
 | 102 | DialogBox.drawBox(Graphics,x,y,w,Z)V | 0x42497c | sync_clip, clears the image (ops+0x28 via 0x4177a4), then passes a block to 0x42318d -> 0x403587 -> 0x4233ed. The block holds title chars/len, text chars/len, a flag of 1, `m_justify`, the dst image, args x,y,w,Z and `m_startTextY`. Real layout code is 0x4233ed | med (layout: low) |
 | 103 | FX.doRotazoom(g,img,angle,zoom,cx,cy)V | 0x424b70 | fx[0]=0x415b6a. Rotate/zoom (16.16, zoom 0 = 1:1). Power-of-2 sources wrap | med |
@@ -401,13 +401,25 @@ RayCast fields: `wallGraph_Table` (Image[]), `wallgraph_width_poxOf2` (byte[]), 
   - `state&8` without 0x10: one blit, mode 3, or 4 with `state&0x20`.
   - `state&8|0x10`: the image is tile 2t and the mask is tile 2t+1, drawn mask first. Modes 4 then
     3, or 3 then 4 with 0x20.
-  - **Open, needs the Graphics analysis.** I could not trace any effect of the mode argument of
-    `blit` 0x418008. Both stock image vtables implement the setPaintMode slot (ops+0x30) as a stub.
-    In 8-bit it only calls accelerator hook `*(0x457f38)` = 0x42d463, which returns 1.
-    Transparency may therefore come only from the source image's transparent colour.
+  - **Resolved [H]:** the mode argument of `blit` 0x418008 has no effect. 0x418008 calls the
+    source's setPaintMode slot (ops+0x30) with it (0x418154) and nothing else reads it; that slot
+    is a stub in both vtables (8-bit 0x42c351 calls hook `[0x457f38]` = 0x42d463, `return 1`).
+    Transparency comes only from the source image's blit mode (transparent key, palette alpha).
+    With WITHMASK the mask tile is simply drawn before the image tile, through the same blitter.
+  - The OPACITY bit is inverted from what its name suggests: without it tiles are drawn with
+    mode 1, with it (and without WITHMASK) mode 3/4. Both draw the same way.
+  - An animated cell reads `animTileIndex[(-v) % (animTileMaxIndex+1)]` without a bounds or null
+    check; `background` null, `charW` or `charH` 0 skip the tile pass.
+- **Clip.** The view intersection is written into the Graphics object's clip fields (+0x24..+0x30)
+  for the duration of the call (so AnimBitmap.draw's sync_clip sees it) and restored on every exit
+  except the fatal one.
 - **Sprites.**
   - Every draw does an in-place cocktail sort of the linked list by `z`, ascending, so the lowest z
-    is drawn first, at the back.
+    is drawn first, at the back. **Bug:** a swap relinks only the two sprites (a.next, a.prev,
+    b.next, b.prev) and first/last, never the outer neighbours (0x427c2d..0x427c90 and
+    0x427d4b..0x427dae). Any swap that is not at both ends of the list corrupts it: e.g. A(z0),
+    B(z5), C(z3) leaves A.next = B, B.next = null, so C is no longer drawn (it is still reachable
+    backwards through B.prev). Kept as is in src/core/playfield.c. No corpus game calls addSprite.
   - Then each visible sprite is drawn at `(viewX-x+s.x, viewY-y+s.y)` with `s.frame` and
     `s.transform`.
   - Dispatch is by the anim's class CRC32: AnimBitmap (0xe7167d52) goes to native 43, AnimFlash
@@ -439,6 +451,10 @@ RayCast fields: `wallGraph_Table` (Image[]), `wallgraph_width_poxOf2` (byte[]), 
 - AnimFlash is entirely stubbed. getNbFrames=1, getNbLoops=0, getWidth/getHeight return the fields.
 - A divide by zero in getRealFrame when nbFrame == 0 would crash the host (no guard).
 - FX shift effects read the offset array without a bounds check.
+- PlayField.moveTiles copies one column w times instead of moving a block (see #47).
+- PlayField.draw's z sort can drop sprites from the list (see the sprite notes above).
+- addSprite/removeSprite(null) and PlayField.draw with an image lacking native data are fatal
+  (0x407a13), not catchable exceptions.
 
 ### 2.4 Sms, Math, Matrix3D, Vector3D, Debug, java.lang, vm.sys.Runtime, catalog
 

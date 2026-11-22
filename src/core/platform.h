@@ -16,7 +16,8 @@
 
 /* Framework class indices the natives need, resolved by class hash on first use. */
 enum {
-    PC_GRAPHICS, PC_IMAGE, PC_PALETTE, PC_RESOURCE, PC_TEXTUREMAP, PC_GAMELET, PC_COUNT
+    PC_GRAPHICS, PC_IMAGE, PC_PALETTE, PC_RESOURCE, PC_TEXTUREMAP, PC_GAMELET,
+    PC_ANIMBITMAP, PC_PLAYFIELD, PC_SPRITE, PC_ANIMFLASH, PC_COUNT
 };
 
 struct ExenPlatform {
@@ -47,6 +48,8 @@ void plat_warn_once(ExenVM *vm, int bit, const char *fmt, ...);
 void graphics_register(void);
 /* resource.c */
 void resource_register(void);
+/* playfield.c (AnimBitmap, PlayField, AnimFlash, Displayable) */
+void playfield_register(void);
 /* platform.c */
 void gamelet_register(void);
 void platform_set_font(ExenVM *vm, const uint8_t *bits);
@@ -79,5 +82,9 @@ void eximg_sync_clip(ExenVM *vm, ref_t graphics, EXimg *e);
 /* drawImageCore (0x418008). */
 int eximg_draw_image(ExenVM *vm, EXimg *d, int dx, int dy, int dw, int dh, EXimg *s, int sx,
                      int sy, int sw, int sh, int tr);
+/* Built-in font drawText (0x413b4f): `len` bytes of `s` at (x, y) in colour c, clipped to e's
+ * clip rect. 0xFF ends the text. */
+void eximg_draw_text(ExenVM *vm, EXimg *e, int32_t x, int32_t y, const uint8_t *s, int32_t len,
+                     uint8_t c);
 
 #endif

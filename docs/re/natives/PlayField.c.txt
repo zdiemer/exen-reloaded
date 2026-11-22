@@ -34,9 +34,16 @@ int cell_get(PF *pf, int cx, int cy) {
  * 49 setCellTile(I,I,I)V @0x426fa8: bounds-checked cell_set, else ignored.
  * 46 fillCells(cx,cy,w,h,v)V @0x427013: clip rect to the map (negative cx/cy shrink w/h), cell_set
  *    every cell with (s16)v.
- * 47 moveTiles(sx,sy,dx,dy,w,h)V @0x42712f: copy a w*h block of cells from (sx,sy) to (dx,dy) with
- *    the rect clipped against the map on both sides; one of 4 loop directions is picked by the
- *    relative position of src/dst (jump table 0x427521) so overlapping moves are safe.  conf high/med */
+ * 47 moveTiles(x1,y1,x2,y2,w,h)V @0x42712f   conf high (re-read 2026-11, instruction by instruction)
+ *    if (!background || x1>=W || x2>=W || y2>=H || y1>=H) return;
+ *    if (x1<0) { x2-=x1; w+=x1; x1=0; }  if (y1<0) { y2-=y1; h+=y1; y1=0; }
+ *    if (x2<0) { x1-=x2; w+=x2; x2=0; }  if (y2<0) { y1-=y2; h+=y2; y2=0; }
+ *    w = min(w, W-x2, W-x1); h = min(h, H-y2, H-y1);
+ *    switch ((x2<x1)*2 + (y2<y1)) {   (jump table 0x427521; cases 1/3 also set y1,y2 += h-1, unused)
+ *      every case: for (i over w, up or down) for (j = 0; j < h; j++) cellSet(pf, x1, j, cellGet(pf, x2, j));
+ *    }
+ *    BUG: i and j are never added to the coordinates, so this copies column x2 rows [0,h) onto
+ *    column x1, w times, instead of moving a block. */
 
 /* 48 draw(Graphics g, int x, int y)V @0x427531   conf high
  * Screen mapping: field pixel (fx,fy) is drawn at screen (fx - x + viewX, fy - y + viewY). */
@@ -48,7 +55,7 @@ u16 PlayField_draw(u32 *a, PF *pf) {
        emptiness); restored at every exit */
     save = g->clip; g->clip = intersect(g->clip, pf->view);
     if (pf->background && pf->charW && pf->charH) {
-        if (!cs || !dst) { log("Playfield Draw: image ptr is null."); throw_internal(0); return 0; }
+        if (!cs || !dst) { log("Playfield Draw: image ptr is null."); fatal_0x407a13(0); return 0; } /* clip not restored */
         sync_clip(g, dst);
         int col0, px0, row0, py0;
         if (ox < 0) { col0 = -ox / charW; px0 = ox % charW; } else { col0 = 0; px0 = ox; }
@@ -78,7 +85,11 @@ u16 PlayField_draw(u32 *a, PF *pf) {
     }
     if (pf->firstSprite) {
         /* In-place cocktail (bidirectional bubble) sort of the sprite list by z ascending, every
-           draw; firstSprite/lastSprite updated; ties keep order. O(n^2) worst case. */
+           draw; firstSprite/lastSprite updated; ties keep order. O(n^2) worst case.
+           BUG (0x427c2d..0x427c90, 0x427d4b..0x427dae): swapping neighbours a,b sets only
+           a.next/prev, b.next/prev and first/last; the outer neighbours keep pointing at the old
+           order, so a swap away from the list ends corrupts the list (a sprite can vanish from
+           the forward walk). Reproduced in src/core/playfield.c sort_sprites(). */
         sort_sprites_by_z(pf);
         for (Sprite *s = pf->firstSprite; s; s = s->next) {
             if (!s->isVisibleBool) continue;
@@ -93,10 +104,10 @@ u16 PlayField_draw(u32 *a, PF *pf) {
     return 0;
 }
 
-/* 51 addSprite(Sprite)V @0x427f95: null -> log+throw_internal(0). If s->next||s->prev -> log
+/* 51 addSprite(Sprite)V @0x427f95: null -> log + fatal 0x407a13(0). If s->next||s->prev -> log
  *    "Sprite ptr has already been added", ignore. If list empty (or first==s) first = s, s->prev = 0;
  *    else last->next = s, s->prev = last. last = s; s->next = 0.  (Appends at tail.)  conf high
- * 52 removeSprite(Sprite)V @0x4280bd: null -> throw. Searches list from first; not found -> log
+ * 52 removeSprite(Sprite)V @0x4280bd: null -> log + fatal 0x407a13(0). Searches list from first; not found -> log
  *    "Sprite ptr has already been removed". Unlinks, fixes first/last, clears s->next/prev. conf high
  * 53 removeAllSprite()V @0x428208: walks the list clearing every next/prev, then first=last=null. conf high
  */
