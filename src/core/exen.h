@@ -52,6 +52,25 @@ typedef struct ExenConfig {
     ExenHost host;
 } ExenConfig;
 
+/* Default handset screen for games not in the game database: the original simulator's default
+ * profile (Panasonic GD87). */
+#define EXEN_DEFAULT_WIDTH 132
+#define EXEN_DEFAULT_HEIGHT 176
+
+enum { EXEN_GAME_UNKNOWN = 0, EXEN_GAME_EXACT = 1, EXEN_GAME_SAME_MAIN_CLASS = 2 };
+
+typedef struct ExenGameInfo {
+    int match;               /* EXEN_GAME_* */
+    int width, height;       /* handset screen the game targets (default if unknown) */
+    char title[64];
+    char main_class[33];
+} ExenGameInfo;
+
+/* Look a game up in the built-in database (data/gamedb.tsv) by file CRC, falling back to its
+ * main class name. Fills `out` with defaults either way; returns EXEN_GAME_*. Usable before
+ * creating a VM, e.g. to size the window. */
+int exen_game_info(const uint8_t *exn, size_t len, ExenGameInfo *out);
+
 /* Lifecycle. Functions returning int give 0 on success, negative on error; exen_error()
  * describes the last failure. */
 ExenVM *exen_create(const ExenConfig *cfg);
