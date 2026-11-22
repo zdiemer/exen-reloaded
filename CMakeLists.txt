@@ -13,17 +13,20 @@ endif()
 # Portable core: no OS headers, no SDL.
 add_library(exen_core STATIC
   src/core/api.c
+  src/core/codec.c
+  src/core/graphics.c
   src/core/hash.c
   src/core/heap.c
   src/core/interp.c
   src/core/loader.c
   src/core/natives.c
   src/core/platform.c
+  src/core/resource.c
 )
 target_include_directories(exen_core PUBLIC src/core)
 
 # Headless runner, used by the compatibility harness.
-add_executable(exen-run src/cli/exen_run.c)
+add_executable(exen-run src/cli/exen_run.c src/cli/png.c)
 target_link_libraries(exen-run PRIVATE exen_core)
 
 # SDL3 frontend. Uses an installed SDL3 if available, otherwise fetches and builds it.

@@ -1,16 +1,18 @@
 /* exen-run: headless runner.
  *
- *   exen-run [--frames N] [--sim gensimu.exe] game.exn
+ *   exen-run [options] game.exn
  *
  * Boots the game and delivers N timer ticks on a virtual clock (no sleeping), then prints a
  * report: frames presented, timer period, halt reason, and native-call counts with the
- * unimplemented ones flagged. The compatibility harness builds on this.
+ * unimplemented ones flagged. Frames can be dumped as PNG and key presses scripted (--help).
+ * The compatibility harness builds on this.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "exen.h"
+#include "png.h"
 
 const char *native_class(int index);
 int native_implemented(int index);
@@ -20,11 +22,27 @@ typedef struct {
     int period;
     int frames;
     int quiet;
+    int tick;
+    const char *dump_dir;
+    int dump_every, scale;
+    int melodies;
 } Run;
 
-static void on_present(void *u, const uint8_t *px, int w, int h) { (void)px; (void)w; (void)h; ((Run *)u)->frames++; }
+static void on_present(void *u, const uint8_t *px, int w, int h)
+{
+    Run *r = u;
+    if (r->dump_dir && r->frames % r->dump_every == 0) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/frame_%05d_t%05d.png", r->dump_dir, r->frames, r->tick);
+        if (png_write_rgb332(path, px, w, h, r->scale) < 0)
+            fprintf(stderr, "cannot write %s\n", path);
+    }
+    r->frames++;
+}
 static void on_timer(void *u, int ms) { ((Run *)u)->period = ms; }
 static uint32_t on_ticks(void *u) { return ((Run *)u)->now_ms; }
+static void on_melody(void *u, const uint8_t *d, int n) { (void)d; (void)n; ((Run *)u)->melodies++; }
+static void on_melody_stop(void *u) { (void)u; }
 static void on_log(void *u, const char *m)
 {
     if (!((Run *)u)->quiet)
@@ -39,7 +57,7 @@ static uint8_t *slurp(const char *path, size_t *len)
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    uint8_t *b = malloc((size_t)n);
+    uint8_t *b = malloc(n > 0 ? (size_t)n : 1);
     if (b && fread(b, 1, (size_t)n, f) != (size_t)n) {
         free(b);
         b = NULL;
@@ -49,21 +67,125 @@ static uint8_t *slurp(const char *path, size_t *len)
     return b;
 }
 
+/* Scripted input: "tick:key[/hold]" items separated by commas. */
+typedef struct { int tick, key, hold; } KeyEv;
+
+#define BAD_KEY 0x7fffffff
+
+static int key_code(const char *k)
+{
+    static const struct { const char *name; int code; } names[] = {
+        {"ok", EXEN_KEY_OK}, {"select", EXEN_KEY_OK}, {"clear", EXEN_KEY_CLEAR},
+        {"back", EXEN_KEY_CLEAR}, {"up", EXEN_KEY_2}, {"down", EXEN_KEY_8},
+        {"left", EXEN_KEY_4}, {"right", EXEN_KEY_6}, {"fire", EXEN_KEY_5},
+        {"star", EXEN_KEY_STAR}, {"pound", EXEN_KEY_POUND},
+        {"pad-up", EXEN_KEY_PAD_UP}, {"pad-down", EXEN_KEY_PAD_DOWN},
+        {"pad-left", EXEN_KEY_PAD_LEFT}, {"pad-right", EXEN_KEY_PAD_RIGHT},
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (!strcmp(k, names[i].name))
+            return names[i].code;
+    if (k[0] && !k[1] && ((k[0] >= '0' && k[0] <= '9') || k[0] == '*' || k[0] == '#'))
+        return k[0];
+    char *end;
+    long v = strtol(k, &end, 0);
+    if (*k && !*end)
+        return (int)v;
+    return BAD_KEY;
+}
+
+static int parse_keys(const char *spec, KeyEv *ev, int max)
+{
+    int n = 0;
+    char buf[8192];
+    snprintf(buf, sizeof buf, "%s", spec);
+    for (char *item = strtok(buf, ","); item && n < max; item = strtok(NULL, ",")) {
+        char *colon = strchr(item, ':');
+        if (!colon)
+            return -1;
+        *colon = 0;
+        char *slash = strchr(colon + 1, '/');
+        int hold = 1;
+        if (slash) {
+            *slash = 0;
+            hold = atoi(slash + 1);
+            if (hold < 1)
+                hold = 1;
+        }
+        int code = key_code(colon + 1);
+        if (code == BAD_KEY)
+            return -1;
+        ev[n++] = (KeyEv){atoi(item), code, hold};
+    }
+    return n;
+}
+
+static void usage(void)
+{
+    fprintf(stderr,
+            "usage: exen-run [options] game.exn\n"
+            "  --frames N        timer ticks to run (default 300)\n"
+            "  --sim FILE        gensimu.exe to take the framework from\n"
+            "  --size WxH        screen size (default 101x80)\n"
+            "  --eeprom FILE     initial 2048-byte EEPROM image\n"
+            "  --dump DIR        write presented frames as DIR/frame_NNNNN_tTTTTT.png\n"
+            "                    (N = frame number, T = tick it was presented in)\n"
+            "  --dump-every N    only every Nth presented frame (default 1)\n"
+            "  --scale S         scale dumped frames by S (default 1)\n"
+            "  --keys SPEC       scripted input: comma-separated tick:key[/hold]. The key is\n"
+            "                    pressed just before tick `tick` and released `hold` ticks\n"
+            "                    later (default 1). Keys: 0-9 * # ok clear up down left right\n"
+            "                    fire (up/down/left/right/fire send 2/8/4/6/5, as gensimu maps\n"
+            "                    the arrow keys), pad-up pad-down pad-left pad-right, or a\n"
+            "                    number. Example: --keys \"20:ok,40:down/3,60:ok\"\n"
+            "  --quiet           no VM log\n");
+}
+
 int main(int argc, char **argv)
 {
-    const char *sim = "vendor/gensimu/gensimu.exe", *game = NULL;
-    int frames = 300;
-    Run run = {0, -1, 0, 0};
+    const char *sim = "vendor/gensimu/gensimu.exe", *game = NULL, *eeprom = NULL;
+    int frames = 300, sw = 0, sh = 0;
+    Run run = {0};
+    run.period = -1;
+    run.dump_every = 1;
+    run.scale = 1;
+    static KeyEv keys[1024];
+    int nkeys = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--sim") && i + 1 < argc) sim = argv[++i];
         else if (!strcmp(argv[i], "--quiet")) run.quiet = 1;
-        else game = argv[i];
+        else if (!strcmp(argv[i], "--dump") && i + 1 < argc) run.dump_dir = argv[++i];
+        else if (!strcmp(argv[i], "--dump-every") && i + 1 < argc) run.dump_every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--scale") && i + 1 < argc) run.scale = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--eeprom") && i + 1 < argc) eeprom = argv[++i];
+        else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
+            if (sscanf(argv[++i], "%dx%d", &sw, &sh) != 2) {
+                usage();
+                return 2;
+            }
+        } else if (!strcmp(argv[i], "--keys") && i + 1 < argc) {
+            nkeys = parse_keys(argv[++i], keys, 1024);
+            if (nkeys < 0) {
+                fprintf(stderr, "bad --keys spec\n");
+                return 2;
+            }
+        } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+            usage();
+            return 0;
+        } else if (argv[i][0] == '-' && argv[i][1] == '-') {
+            usage();
+            return 2;
+        } else {
+            game = argv[i];
+        }
     }
     if (!game) {
-        fprintf(stderr, "usage: exen-run [--frames N] [--sim gensimu.exe] [--quiet] game.exn\n");
+        usage();
         return 2;
     }
+    if (run.dump_every < 1)
+        run.dump_every = 1;
     size_t sl, gl;
     uint8_t *simb = slurp(sim, &sl), *gameb = slurp(game, &gl);
     if (!simb || !gameb) {
@@ -71,20 +193,41 @@ int main(int argc, char **argv)
         return 2;
     }
     ExenConfig cfg = {0};
-    cfg.host = (ExenHost){&run, on_present, on_timer, on_ticks, NULL, NULL, on_log};
+    cfg.screen_width = sw;
+    cfg.screen_height = sh;
+    cfg.host = (ExenHost){&run, on_present, on_timer, on_ticks, on_melody, on_melody_stop, on_log};
     ExenVM *vm = exen_create(&cfg);
     if (!vm || exen_load_framework(vm, simb, sl) < 0 || exen_load_game(vm, gameb, gl) < 0) {
         fprintf(stderr, "load failed: %s\n", vm ? exen_error(vm) : "out of memory");
         return 1;
     }
+    if (eeprom) {
+        size_t el;
+        uint8_t *eb = slurp(eeprom, &el);
+        if (!eb) {
+            fprintf(stderr, "cannot read %s\n", eeprom);
+            return 2;
+        }
+        memcpy(exen_eeprom(vm), eb, el < 2048 ? el : 2048);
+        free(eb);
+    }
     int rc = exen_boot(vm);
     int ticks = 0;
     for (; rc == 0 && ticks < frames && !exen_halted(vm); ticks++) {
+        run.tick = ticks;
+        for (int k = 0; k < nkeys && rc == 0; k++) {
+            if (keys[k].tick == ticks)
+                rc = exen_key(vm, keys[k].key, 1);
+            if (rc == 0 && keys[k].tick + keys[k].hold == ticks)
+                rc = exen_key(vm, keys[k].key, 0);
+        }
+        if (rc != 0 || exen_halted(vm))
+            break;
         run.now_ms += run.period > 0 ? (uint32_t)run.period : 100;
         rc = exen_tick(vm);
     }
-    printf("game: %s\nticks: %d  frames presented: %d  timer period: %d ms\n", game, ticks,
-           run.frames, run.period);
+    printf("game: %s\nticks: %d  frames presented: %d  timer period: %d ms  melodies: %d\n", game,
+           ticks, run.frames, run.period, run.melodies);
     printf("status: %s\n", exen_halted(vm) ? exen_error(vm) : "running");
     printf("natives called:\n");
     for (int i = 0; i < 256; i++) {

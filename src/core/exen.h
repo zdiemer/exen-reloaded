@@ -23,6 +23,9 @@ enum {
     EXEN_KEY_5, EXEN_KEY_6, EXEN_KEY_7, EXEN_KEY_8, EXEN_KEY_9,
     EXEN_KEY_STAR = '*', EXEN_KEY_POUND = '#',
     EXEN_KEY_CLEAR = -7, EXEN_KEY_OK = -8,
+    /* Gamelet.KEY_PAD_*, for handsets with a joypad. gensimu never sends these: it maps the
+     * PC arrow keys to '4' '2' '6' '8' (docs/re/NATIVES.md §4.2). */
+    EXEN_KEY_PAD_UP = -1, EXEN_KEY_PAD_LEFT = -2, EXEN_KEY_PAD_RIGHT = -5, EXEN_KEY_PAD_DOWN = -6,
 };
 
 typedef struct ExenHost {
