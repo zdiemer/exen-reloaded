@@ -40,13 +40,17 @@ Text resources use `0xff` as a line separator (e.g. `CONTROLS\xff\xffLeft:\xff�
 
 ## `4CVP` code chunks
 
-The code is a prelinked class image. All symbolic names are stripped from game code; calls into
-the framework go by index. The framework itself is 58 `4CVP` class blocks inside `gensimu.exe`
-(`.rdata`), and those *do* carry names: `exen.Gamelet`, `exen.Graphics`, `exen.Image`,
-`exen.Palette`, `exen.Resource`, `exen.Animation`, `exen.AnimBitmap`, `exen.PlayField`,
-`exen.Sprite`, `exen.AnimFlash`, `exen.Command`, `exen.Displayable`, `java.lang.*`,
-`vm.sys.{Runtime,Application,Bootstrap}`.
+Fully specified in [`docs/re/CVP.md`](re/CVP.md); parsed by `tools/cvp.py`. In brief:
 
-Header (first bytes of every chunk seen so far): `"4CVP"`, then a `u32` that looks like a
-checksum or id, then size fields. Name references inside the tables look like 32-bit hashes
-(runs of `xxxx916e`). To be decoded.
+- The code chunk is a run of blocks, **one per class** (2–24 classes per game). Each block starts
+  `"4CVP"`, `u16 size`, and is padded to 4 bytes.
+- Classes are numbered globally: the 54 framework classes in `gensimu.exe` are 0–53 in their
+  `.rdata` order, and game classes follow from 54. Class references in game code are these indices,
+  so the framework order is part of the ABI.
+- Game code has no symbol names. Members are resolved at run time by a 32-bit hash:
+  `crc16(descriptor) << 16 | crc16(name)` (CRC-16/MCRF4XX). Class hashes are CRC-32 of the dotted
+  name. The framework blocks keep names in debug lists, which is how game overrides such as
+  `onInit` and `paint` can be identified.
+- There is no constant pool: constants, strings and refs sit inline after each method's code.
+
+The instruction set is in [`docs/re/OPCODES.md`](re/OPCODES.md) and disassembled by `tools/disasm.py`.
