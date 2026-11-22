@@ -481,6 +481,30 @@ size_t exen_state_size(ExenVM *vm)
     return write_state(vm, &w);
 }
 
+/* Worst-case size of the zero-run code for an n-byte image: every literal byte, plus one 8-byte
+ * record header per record. A record after the first starts only after at least RLE_MIN_ZEROS
+ * zeros and holds at least one literal byte, so there are at most n / (RLE_MIN_ZEROS + 1) of
+ * them, plus the first and a trailing zeros-only record. */
+static size_t rle_bound(size_t n) { return n + 8u * (n / (RLE_MIN_ZEROS + 1u) + 2u); }
+
+size_t exen_state_max_size(ExenVM *vm)
+{
+    if (!vm->exn || !vm->plat)
+        return 0;
+    const struct ExenPlatform *p = vm->plat;
+    size_t n = HDR_BYTES;
+    /* VM: fixed fields, the halt reason, the class statics */
+    n += 8 + 16 * 4 + sizeof vm->halt_reason + 4u * (size_t)vm->nclasses;
+    n += 8 + 4 + rle_bound(vm->heap_end - vm->heap_start);         /* HEAP */
+    n += 8 + 4 + rle_bound((size_t)EXEN_STACK_WORDS * 4u);          /* STAK */
+    n += 8 + rle_bound(vm->code_end);                               /* CODE, if present */
+    n += 8 + 6 * 4 + sizeof p->lut + (size_t)p->width * (size_t)p->height; /* PLAT */
+    n += 8 + EXEN_EEPROM_SIZE;                                      /* EEPR */
+    /* MELO: header fields, the melody bytes, program table, voices, output filters */
+    n += 8 + 16 * 4 + MELODY_MAX + sizeof p->melody.program + MELODY_VOICES * 10 * 4 + 4 * 4;
+    return n + 256; /* slack for small additions to the chunks above */
+}
+
 int exen_state_save(ExenVM *vm, void *buf, size_t cap)
 {
     if (!can_capture(vm))

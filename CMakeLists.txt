@@ -69,6 +69,48 @@ if(EXEN_BUILD_SDL)
   endif()
 endif()
 
+# libretro core (docs/LIBRETRO.md): exen_reloaded_libretro.dll / .so / .dylib, exporting only
+# the retro_* entry points, plus a headless test frontend that loads it like a frontend would.
+option(EXEN_BUILD_LIBRETRO "Build the libretro core" OFF)
+if(EXEN_BUILD_LIBRETRO)
+  # A position-independent, hidden-visibility build of the core for the shared library; exen_core
+  # itself stays as it is for the executables.
+  get_target_property(EXEN_CORE_SOURCES exen_core SOURCES)
+  add_library(exen_core_pic STATIC ${EXEN_CORE_SOURCES})
+  target_include_directories(exen_core_pic PUBLIC src/core)
+  set_target_properties(exen_core_pic PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+  add_library(exen_reloaded_libretro SHARED src/libretro/libretro.c)
+  target_link_libraries(exen_reloaded_libretro PRIVATE exen_core_pic)
+  set_target_properties(exen_reloaded_libretro PROPERTIES PREFIX "" C_VISIBILITY_PRESET hidden)
+  # the core info file goes beside the built core, ready to copy into a frontend
+  configure_file(src/libretro/exen_reloaded_libretro.info exen_reloaded_libretro.info COPYONLY)
+  if(WIN32)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+      target_link_options(exen_reloaded_libretro PRIVATE -static-libgcc)
+    endif()
+  elseif(APPLE)
+    target_link_options(exen_reloaded_libretro PRIVATE "LINKER:-exported_symbol,_retro_*")
+  else()
+    target_link_options(exen_reloaded_libretro PRIVATE
+      "LINKER:--version-script=${PROJECT_SOURCE_DIR}/src/libretro/libretro.map"
+      "LINKER:--no-undefined")
+    set_property(TARGET exen_reloaded_libretro APPEND PROPERTY LINK_DEPENDS
+      "${PROJECT_SOURCE_DIR}/src/libretro/libretro.map")
+  endif()
+
+  add_executable(exen-libretro-test src/libretro/test_frontend.c src/cli/png.c)
+  target_include_directories(exen-libretro-test PRIVATE src/libretro src/cli)
+  target_link_libraries(exen-libretro-test PRIVATE ${CMAKE_DL_LIBS})
+  target_compile_definitions(exen-libretro-test PRIVATE
+    EXEN_LIBRETRO_CORE_PATH="$<TARGET_FILE:exen_reloaded_libretro>"
+    EXEN_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+  add_dependencies(exen-libretro-test exen_reloaded_libretro)
+  # Asset-free check on the vendored download1.exn; the corpus run is documented in LIBRETRO.md.
+  add_test(NAME libretro_core
+    COMMAND exen-libretro-test --frames 300 "${PROJECT_SOURCE_DIR}/vendor/gensimu/flash/download1.exn")
+  set_tests_properties(libretro_core PROPERTIES TIMEOUT 300 LABELS smoke)
+endif()
+
 # Tests: ctest --test-dir build --output-on-failure. enable_testing() is unconditional so that
 # tests declared above (sdl_input) register too; EXEN_BUILD_TESTS adds the unit tests in tests/.
 option(EXEN_BUILD_TESTS "Build the unit tests" OFF)

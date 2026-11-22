@@ -37,6 +37,11 @@ cp "$build/exen-reloaded$exe" "$build/exen-run$exe" "$dir/"
 find "$build" -maxdepth 3 \( -name 'SDL3.dll' -o -name 'libSDL3*.so*' -o -name 'libSDL3*.dylib' \) \
   -exec cp -P {} "$dir/" \;
 cp "$root/README.md" "$dir/"
+# libretro core and its .info (install into the frontend's cores/ and info/ directories)
+for core in "$build"/exen_reloaded_libretro.dll "$build"/exen_reloaded_libretro.so "$build"/exen_reloaded_libretro.dylib; do
+  [ -f "$core" ] && mkdir -p "$dir/libretro" && cp "$core" "$build/exen_reloaded_libretro.info" "$dir/libretro/"
+done
+[ -f "$root/docs/LIBRETRO.md" ] && cp "$root/docs/LIBRETRO.md" "$dir/libretro/" 2>/dev/null || true
 cp "$root/vendor/gensimu/gensimu.exe" "$dir/"
 cp "$root/vendor/gensimu/PROVENANCE.md" "$dir/gensimu-PROVENANCE.md"
 if [ -f "$root/LICENSE" ]; then

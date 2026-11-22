@@ -87,6 +87,7 @@ jobs:
           -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=ON
           -DEXEN_FETCH_SDL=ON
           -DEXEN_BUILD_TESTS=ON
+          -DEXEN_BUILD_LIBRETRO=ON
           ${{ runner.os == 'macOS' && '-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' || '' }}
           ${{ runner.os == 'Windows' && '-DCMAKE_EXE_LINKER_FLAGS=-static' || '' }}
 
