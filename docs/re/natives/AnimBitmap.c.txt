@@ -1,0 +1,82 @@
+/* exen.AnimBitmap natives 43..45. ABI: see Resource.c.txt.
+ *
+ * exen.AnimBitmap fields (class block 0x44bd70; superclass exen.Animation has no fields):
+ *   +0x18 image          exen.Image
+ *   +0x1c nbFrame        int
+ *   +0x20 width          int   (frame width)
+ *   +0x24 height         int   (frame height)
+ *   +0x28 state          int   bit0 = WITHMASK, bit1 = INVERSEVIDEO (statics WITHMASK/INVERSEVIDEO)
+ *   +0x2c listCoords     short[]  optional, 4 shorts per frame: x, y, w, h
+ *   +0x30 frameSequence  int[]    optional, logical frame -> physical frame
+ *
+ * Native image struct (EXimg, returned by img_struct(javaImage) = 0x426785; it lives inside the
+ * Image.image_imgT byte[] (+0x28) data, pixels in Image.image_Data byte[] (+0x24) data):
+ *   +0x00 u8 *pixels  (= image_Data+0x14 + getManufDisplayHeaderSize(), which is 0 in gensimu)
+ *   +0x04 width  +0x08 height  +0x10 depth (bpp)  +0x14 stride (bytes/row)
+ *   +0x18 clipX  +0x1c clipY  +0x20 clipW  +0x24 clipH
+ *   +0x28 ops vtable (1-bit: 0x45bca8, 8-bit: 0x45bcf8); ops+0x30 = setPaintMode, +0x34 = blit,
+ *         +0x40 = FX table.
+ * sync_clip(Graphics g, EXimg *dst) = 0x425650: copies g.clipX..clipHeight (g+0x24..0x30) into
+ *   dst+0x18..0x24 and calls dst->ops->setPaintMode((s16)g.curPaintMode).
+ * blit(dst, dx, dy, w, h, src, sx, sy, w, h, mode, transform) = 0x418008. `mode` goes to
+ *   src->ops+0x30, `transform` (Sprite.TRANSFORM_*, 4/5 = rotate 270/90 swap w/h) to ops+0x34.
+ *   NOTE (conf medium): in both stock vtables ops+0x30 is a stub (1-bit 0x42baf3 returns 1; 8-bit
+ *   0x42c351 calls accelerator hook *(0x457f38) = 0x42d463 which returns 1), so the `mode` codes
+ *   below may have no visible effect in gensimu; transparency then comes from the source image's
+ *   own transparent colour inside the row copier (ops+0x38). Needs confirming in the Graphics work.
+ */
+
+/* frame_index(ab, f) = 0x424580 (also native 45 getRealFrame(I)I @0x42467b)   conf high */
+int frame_index(AnimBitmap *ab, int f) {
+    if (ab->frameSequence) {
+        int L = ab->frameSequence->length;          /* u16 at +0x12 */
+        f %= L; if (f < 0) f += L;
+        f = ((int*)ab->frameSequence->data)[f];
+    }
+    f %= ab->nbFrame; if (f < 0) f += ab->nbFrame;  /* nbFrame==0 -> x86 #DE crash */
+    return f;
+}
+
+/* 44 moduloFrame(I)I @0x4245fe   conf high:
+ *   L = frameSequence ? frameSequence.length : nbFrame;  r = f % L; if (r<0) r += L;  return r. */
+
+/* frame_rect(ab, f, out[4]) = 0x4243d0   conf high */
+void frame_rect(AnimBitmap *ab, int f, int out[4]) {
+    out = { ab->width, ab->height, 0, 0 } /* first two are overwritten below */;
+    f %= (s16)ab->nbFrame; if (f < 0) f += (s16)ab->nbFrame;
+    if (ab->listCoords == NULL) {
+        if (!(s16)ab->width || !(s16)ab->height || !ab->image) return;   /* out stays {w,h,0,0} */
+        int iw = (s16)ab->image->width;                        /* Image.width, +0x18 */
+        if (!iw || !(s16)ab->width) { log("exen_Animation_draw, Param nl=0, ..."); return; }
+        if (ab->state & 1) iw >>= 1;                           /* WITHMASK: right half is the mask */
+        int cols = iw / (s16)ab->width;
+        out[0] = (f % cols) * (s16)ab->width;  out[1] = (f / cols) * (s16)ab->height;
+        out[2] = (s16)ab->width;               out[3] = (s16)ab->height;
+    } else {
+        s16 *c = (s16*)ab->listCoords->data + 4*f;
+        out[0]=c[0]; out[1]=c[1]; out[2]=c[2]; out[3]=c[3];
+    }
+}
+
+/* 43 draw(Graphics g, int x, int y, int frame, int transform)V  @0x42469c   conf high (mode meaning: see note)
+ * Also called directly from PlayField.draw for sprites whose anim is an AnimBitmap. */
+u16 AnimBitmap_draw(u32 *a, AnimBitmap *ab) {
+    Graphics *g = a[1]; int x = a[2], y = a[3], frame = a[4], transform = a[5];
+    s16 state = (s16)ab->state;
+    if (!g) return 0;
+    EXimg *src = img_struct(ab->image), *dst = img_struct(g->pixIma);
+    if (!src || !dst) return 0;
+    sync_clip(g, dst);
+    if (!ab->image || !ab->nbFrame || !ab->image->width || !ab->image->height) return 0;
+    int r[4]; frame_rect(ab, frame_index(ab, frame), r);   /* r = sx, sy, w, h */
+    int maskx = r[0] + ab->image->width / 2;               /* mask = same frame in right half */
+    u8 mode = 4;
+    if (!(state & 2)) {                                    /* normal video */
+        if (state & 1) blit(dst, x, y, r[2], r[3], src, maskx, r[1], r[2], r[3], 3, transform);
+    } else {                                               /* INVERSEVIDEO */
+        if (ab->state & 1) blit(dst, x, y, r[2], r[3], src, maskx, r[1], r[2], r[3], 4, transform);
+        mode = 3;
+    }
+    blit(dst, x, y, r[2], r[3], src, r[0], r[1], r[2], r[3], mode, transform);
+    return 0;
+}

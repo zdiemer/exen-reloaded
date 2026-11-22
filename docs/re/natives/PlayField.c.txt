@@ -1,0 +1,102 @@
+/* exen.PlayField natives 46..53. ABI: see Resource.c.txt; EXimg/blit/sync_clip: see AnimBitmap.c.txt.
+ *
+ * exen.PlayField fields (class block 0x44c36c):
+ *   +0x18 state            bit flags. Statics (names, slot order): INDEX_TABLE, BACKGROUND, CHARSET,
+ *                          ALL, CHARSET_OPACITY, CHARSET_WITHMASK, CHARSET_INVERSEVIDEO. Bits tested
+ *                          natively: 0x2|0x4 (both needed to draw tiles), 0x8, 0x10, 0x20 - presumably
+ *                          BACKGROUND=2, CHARSET=4, OPACITY=8, WITHMASK=0x10, INVERSEVIDEO=0x20
+ *                          (values are set in <clinit> bytecode; not verified, conf medium).
+ *   +0x1c charSet          exen.Image (tile sheet)
+ *   +0x20 animTileIndex    short[]  animated-tile table
+ *   +0x24 animTileMaxIndex int
+ *   +0x28 charW  +0x2c charH          tile size in pixels
+ *   +0x30 background       byte[]   cell map, row-major, index = cy*backgroundW + cx
+ *   +0x34 backgroundW  +0x38 backgroundH   map size in cells
+ *   +0x3c nbBits           8 -> one u8 per cell, otherwise (16) one u16 per cell (LE)
+ *   +0x40 viewX +0x44 viewY +0x48 viewW +0x4c viewH   destination window on the Graphics
+ *   +0x50 firstSprite +0x54 lastSprite  doubly linked list of exen.Sprite
+ * exen.Sprite fields (0x44cf5c): +0x18 anim, +0x1c frame, +0x20 x, +0x24 y, +0x28 z,
+ *   +0x2c isVisibleBool, +0x30 transform, +0x34 next, +0x38 prev.
+ * ref_assign(newval, oldval) = 0x40a282 is called before every reference-field store (GC
+ *   reference counting / write barrier) - a port with its own GC can drop it.
+ */
+
+/* cell_get(pf,cx,cy) = 0x426e9b   conf high
+ * Cells >= (1<<nbBits) - animTileMaxIndex are negative "animated tile" references. */
+int cell_get(PF *pf, int cx, int cy) {
+    int i = cy * pf->backgroundW + cx;
+    unsigned v = (pf->nbBits == 8) ? ((u8*)pf->background->data)[i] : ((u16*)pf->background->data)[i];
+    return (v >= (1u << pf->nbBits) - pf->animTileMaxIndex) ? (int)v - (1 << pf->nbBits) : (int)v;
+}
+/* cell_set(pf,cx,cy,v) = 0x426e30: if (v<0) v += 1<<nbBits; store u8 or u16.   conf high */
+
+/* 50 getCellTile(I,I)I @0x426f37: bounds-checked (0<=cx<W, 0<=cy<H, background!=null) cell_get, else 0.
+ * 49 setCellTile(I,I,I)V @0x426fa8: bounds-checked cell_set, else ignored.
+ * 46 fillCells(cx,cy,w,h,v)V @0x427013: clip rect to the map (negative cx/cy shrink w/h), cell_set
+ *    every cell with (s16)v.
+ * 47 moveTiles(sx,sy,dx,dy,w,h)V @0x42712f: copy a w*h block of cells from (sx,sy) to (dx,dy) with
+ *    the rect clipped against the map on both sides; one of 4 loop directions is picked by the
+ *    relative position of src/dst (jump table 0x427521) so overlapping moves are safe.  conf high/med */
+
+/* 48 draw(Graphics g, int x, int y)V @0x427531   conf high
+ * Screen mapping: field pixel (fx,fy) is drawn at screen (fx - x + viewX, fy - y + viewY). */
+u16 PlayField_draw(u32 *a, PF *pf) {
+    Graphics *g = a[1];  if (!g) return 0;
+    int ox = pf->viewX - a[2], oy = pf->viewY - a[3];        /* screen pos of field pixel (0,0) */
+    EXimg *dst = img_struct(g->pixIma), *cs = img_struct(pf->charSet);
+    /* temporarily intersect the Graphics clip with the view rect (0x4177c6; result not checked for
+       emptiness); restored at every exit */
+    save = g->clip; g->clip = intersect(g->clip, pf->view);
+    if (pf->background && pf->charW && pf->charH) {
+        if (!cs || !dst) { log("Playfield Draw: image ptr is null."); throw_internal(0); return 0; }
+        sync_clip(g, dst);
+        int col0, px0, row0, py0;
+        if (ox < 0) { col0 = -ox / charW; px0 = ox % charW; } else { col0 = 0; px0 = ox; }
+        if (oy < 0) { row0 = -oy / charH; py0 = oy % charH; } else { row0 = 0; py0 = oy; }
+        if ((pf->state & 6) == 6 && col0 < W && row0 < H && px0 < dst->width && py0 < dst->height) {
+            int tilesPerRow = pf->charSet->width / charW;  /* 0 -> log "charNW=0" and return */
+            /* column-major traversal: for each column, walk down the rows */
+            for (int cx = col0, px = px0; px < dst->width && cx < W; cx++, px += charW)
+              for (int cy = row0, py = py0; py < dst->height && cy < H; cy++, py += charH) {
+                int t = cell_get(pf, cx, cy);
+                if (t < 0) t = ((s16*)pf->animTileIndex->data)[(-t) % (pf->animTileMaxIndex + 1)];
+                if (t == 0) continue;                      /* tile 0 = empty, nothing drawn */
+                t -= 1;
+                if (!(state & 8)) {                        /* opaque */
+                    blit(dst, px,py,charW,charH, cs, (t%tpr)*charW, (t/tpr)*charH, charW,charH, 1, 0);
+                } else if (state & 0x10) {                 /* tile + mask: tiles 2t (image) and 2t+1 (mask) */
+                    int sx = ((2*t)%tpr)*charW, sy = ((2*t)/tpr)*charH;
+                    u16 m1 = (state & 0x20) ? 3 : 4, m2 = (state & 0x20) ? 4 : 3;
+                    blit(dst, px,py,charW,charH, cs, sx+charW, sy, charW,charH, m1, 0);   /* mask */
+                    blit(dst, px,py,charW,charH, cs, sx,       sy, charW,charH, m2, 0);   /* tile */
+                } else {                                   /* transparent, single pass */
+                    blit(dst, px,py,charW,charH, cs, (t%tpr)*charW, (t/tpr)*charH, charW,charH,
+                         (state & 0x20) ? 4 : 3, 0);
+                }
+              }
+        }
+    }
+    if (pf->firstSprite) {
+        /* In-place cocktail (bidirectional bubble) sort of the sprite list by z ascending, every
+           draw; firstSprite/lastSprite updated; ties keep order. O(n^2) worst case. */
+        sort_sprites_by_z(pf);
+        for (Sprite *s = pf->firstSprite; s; s = s->next) {
+            if (!s->isVisibleBool) continue;
+            Object *an = s->anim;  u32 cls = an->class->hash;      /* obj+4 -> class, +0xc crc32 */
+            u32 fa[6] = { an, g, ox + s->x, oy + s->y, s->frame, s->transform };
+            if (cls == 0xe7167d52 /* crc32("exen.AnimBitmap") */) AnimBitmap_draw(fa, an);
+            else if (cls == 0xd414954a /* exen.AnimFlash */)        AnimFlash_draw5(fa, an); /* stub */
+            /* any other Animation subclass (bytecode) is silently NOT drawn */
+        }
+    }
+    g->clip = save;
+    return 0;
+}
+
+/* 51 addSprite(Sprite)V @0x427f95: null -> log+throw_internal(0). If s->next||s->prev -> log
+ *    "Sprite ptr has already been added", ignore. If list empty (or first==s) first = s, s->prev = 0;
+ *    else last->next = s, s->prev = last. last = s; s->next = 0.  (Appends at tail.)  conf high
+ * 52 removeSprite(Sprite)V @0x4280bd: null -> throw. Searches list from first; not found -> log
+ *    "Sprite ptr has already been removed". Unlinks, fixes first/last, clears s->next/prev. conf high
+ * 53 removeAllSprite()V @0x428208: walks the list clearing every next/prev, then first=last=null. conf high
+ */

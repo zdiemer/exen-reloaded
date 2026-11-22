@@ -1,0 +1,70 @@
+/* exen.Sms natives (gensimu.exe).
+   Sms object fields: +0x20 byte[0x94] native buffer (data at array+0x14 -> B),
+     +0x24 blockStart (bit pos), +0x28 blockId, +0x2c blockLen, +0x30 consumed bits, +0x34 price index.
+   B[0..3] = magic "EXEN"; P = B+4 = 140-byte payload; POS = *(u32*)(B+0x90) bit position.
+   Globals: cfg = *(u8**)0x45fe8c (simulator SMS/network config block);
+            [[0x45ff3c]+0x14]->+4 -> +0xc = current gamelet id.
+   Calls EXManufGetMccMnc (0x403eda -> 0x434ad0) and EXManufGetLanguageId (0x403d80 -> 0x4341cc).
+   No Win32 in these natives themselves. */
+
+void putbits(u8 *P, u32 *pos, u32 v, int n) {   /* 0x413071 */
+    /* MSB-first, big-endian. sh = 8/16/32 - (pos&7) - n over 1/2/4 bytes at P+(pos>>3)
+       (5-byte straddle case handled by splitting across two u32 windows).
+       w = (w & ~(((1<<n)-1) << sh)) | (v << sh);   -- v is NOT masked to n bits */
+    *pos += n;
+}
+u32 getbits(u8 *P, u32 *pos, int n) {           /* 0x412ea0 */
+    /* same windowing; returns (w >> sh) & ((1<<n)-1); *pos += n */
+}
+static void put11(Sms *s, u32 v) { putbits(P,&POS, v>>8, 3); putbits(P,&POS, v, 8); }   /* 0x421b36 */
+static u32  get11(Sms *s)        { u32 h = getbits(P,&POS,3) << 8; return h | getbits(P,&POS,8); } /* 0x421b7c */
+
+void createSms(Sms *s) {                          /* 0x4298c8 -> header 0x4215fa */
+    POS = 0; memset(B, 0, 0x94); memcpy(B, "EXEN", 4);
+    putbits 8  cfg[5];
+    putbits 8  cfg[7];
+    putbits 16 gameletId (0 if none)              /* 0x4219c5: hi 8, lo 8 */
+    for (i = 0; i < 4; i++) putbits 8 cfg[0x1e+i];
+    EXManufGetMccMnc(&mcc, &mnc);                 /* mcc u16, mnc u8 */
+    mcc = ((mcc&0x0f00)<<4 | (mcc&0xf000)>>4 | (mcc&0x000f)<<4 | (mcc&0x00f0)>>4) >> 4;  /* 12 bits */
+    mnc = (mnc&0x0f)<<4 | (mnc&0xf0)>>4;
+    putbits 12 mcc; putbits 8 mnc;
+    putbits 8  EXManufGetLanguageId();
+    putbits 16 *(u16*)(cfg+0x164);
+    POS += 20;                                    /* reserved */
+    putbits 8 0x60;                               /* 0x421982 */
+    put11(s, 0);
+    s->blockStart = s->blockId = s->blockLen = s->consumed = 0;   /* 0x429870 */
+}
+void createSms_bytes(Sms *s, byte_array *in) {   /* 0x42993b: received SMS */
+    POS = 0; for (i = 0; i < 0x88; i++) P[i] = in->data[i];
+    B[0..3] = 0; POS = 0; reset cursor;
+}
+void createBlock(Sms *s, s8 id) {                /* 0x429a20 */
+    if (POS > 0x42d) return;
+    s->blockStart = POS; s->blockId = id; s->blockLen = s->consumed = 0;
+    putbits 8 id; POS += 11;                       /* length placeholder */
+}
+void writeBits(Sms *s, s8 v, s8 n) {             /* 0x429b0a */
+    if (POS > 0x42d) return; if (n > 7) n = 8;
+    putbits(P, &POS, (u8)v, n);
+}
+int endBlock(Sms *s) {                            /* 0x429b8d */
+    if (POS > 0x42d) return 0;
+    s16 L = POS - (s->blockStart + 19); u16 save = POS;
+    POS = s->blockStart + 8; put11(s, L); POS = save;
+    return L;                                     /* bits */
+}
+int  getIdBlock(Sms *s)     { if (POS >= 0x460) return -1; s->blockStart = POS; return s->blockId = getbits(P,&POS,8); } /* 0x429cb0 */
+int  getLengthBlock(Sms *s) { if (POS > 0x42d) return 0; return s->blockLen = get11(s); }  /* 0x429d2a */
+void nextBlock(Sms *s)      { if (POS > 0x42d) return; s16 L = get11(s); POS += L; reset cursor; } /* 0x429c43 */
+int  readBits(Sms *s, int n){ return getbits(P,&POS,n); }                                   /* 0x429ac0 */
+void skipBits(Sms *s, int n){ if (POS+n <= 0x460) { POS += n; s->consumed += n; } }       /* 0x429d86 */
+String *getPrice(Sms *s) {                        /* 0x429e0a */
+    int v = *(int*)(cfg + 0x1a8 + 0x1c * s->priceIdx);            /* 16.16 */
+    char buf[..]; fmt_price(v, buf, 2);   /* 0x422e57: "%d.%02d \xff", int=v>>16, cents=((v&0xffff)*100)>>16 */
+    strcat(buf, (char*)(cfg + 0x168));    /* currency e.g. "Euro(s)" */
+    return new String(buf);
+}
+void deleteSms(Sms *s) { }                        /* 0x429a18 */
+/* Null buffer in createSms: logs 0x45bbe0 / 0x45bc1c "SMS NOT SENT null pointer". */

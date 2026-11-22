@@ -1,0 +1,71 @@
+/* java.lang.String / StringBuffer natives (gensimu.exe). Chars are 8-bit (char[] = 1 byte/elem).
+   String/StringBuffer object: +0x18 (stored as u64; lo dword used, hi = sign ext) = pstr*
+     where pstr = struct { u16 len; u8 b[]; }; +0x20 = backing char[] or 0.
+   Array header: +0x08 u16 blocksize (incl. 0x14 header), +0x0c u16 typecode, +0x0e u8 pin count,
+     +0x12 u16 count, +0x14 data.  The pstr of a dynamic string is &array->count (array+0x12).
+   Literals point straight into class constant data (u16-len strings), with +0x20 == 0.
+   Helpers: new_obj(0x99,crc) 0x410067; new_array(n,type,crc) 0x410106
+     (char[]: type 0x150 crc 0x9ec04138; byte[]: 0x190 crc 0x5da4d0c7); throw(crc) 0x410198;
+     array_clone 0x411add; array_free 0x411d8e; memcpy 0x40ffaf; itoa 0x411490; ltoa 0x411552.
+   No Win32. */
+
+int String_length(String *self) { return self->pstr ? self->pstr->len : 0; }      /* 0x42ac79 */
+
+int String_compareTo(String *self, String *other) {                                 /* 0x42a85e */
+    if (!other) { throw(NPE /*0x364a8d65*/); return 1; }
+    pstr *a = self->pstr; if (!a) return -1;
+    pstr *b = other->pstr;                     /* not null-checked */
+    for (int i = 0; i < b->len && i < a->len; i++) {
+        if (a->b[i] < b->b[i]) return -1;      /* unsigned bytes */
+        if (a->b[i] > b->b[i]) return  1;
+    }
+    if (b->len < a->len) return -1;            /* NB: inverted relative to Java */
+    return b->len > a->len ? 1 : 0;
+}
+
+String *String_valueOf(int v) {                                                     /* 0x42acb6 */
+    int n = 0, t = v < 0 ? -v : v;
+    do { n++; t /= 10; } while (t);
+    if (v < 0) n++;
+    char_array *a = new_array(n, 0x150, 0x9ec04138);
+    itoa_rev(v, a->data);                      /* 0x411490: '0' for 0; INT_MIN yields garbage */
+    String *s = new_obj(0x99, 0x7772dde3);
+    s->array = clone(a); s->array->pin++; s->pstr = &s->array->count;
+    return s;
+}
+/* toCharArray 0x42a7b0: new char[len], copy bytes.  getBytes 0x42a99f: new byte[len], copy bytes.
+   Private init helpers named "append":
+     0x42aa54 (String src): null -> NPE; src->array ? (this.array = clone(src->array), pin++,
+              this.pstr = &array->count) : (this.pstr = src->pstr)  -- literal shares pointer.
+     0x42aafc (char[] a): null -> NPE; a->count ? clone a as backing : leave empty.
+     0x42ab8c (byte[] a): null -> NPE; new char[count], copy bytes (identity conversion 0x4116f5). */
+
+static int sb_reserve(StringBuffer *sb, u16 add) {                                   /* 0x42af2f */
+    u16 need = add;
+    if (sb->array) {
+        need += sb->array->count;
+        if (need <= sb->array->blocksize - 0x14) return 1;
+    }
+    if (need > 0x4000) { throw(StringIndexOutOfBounds /*0xbea5520f*/); return 0; }
+    char_array *n = new_array(need, 0x150, 0x9ec04138);   /* exact size, no doubling */
+    if (!n) return 0;
+    n->pin++;
+    if (sb->array) {
+        n->count = sb->array->count;
+        memcpy(n->data, sb->array->data, sb->array->count);
+        array_free(sb->array);
+    } else n->count = 0;
+    sb->array = n; sb->pstr = &n->count;
+    return 1;
+}
+/* initStringBuffer(int n) 0x42aeef: n<=0 -> NegativeArraySizeException (0x0794f618); else sb_reserve(n).
+   append(String s) 0x42b056: s==null or s->pstr==null -> no-op (no "null");
+        else sb_reserve(len); memcpy(pstr->b+pstr->len, s->pstr->b, len); pstr->len += len.
+   append(char[] a) 0x42b0f2: null -> NPE; same with a->count / a->data.
+   append(char c) 0x42b19f: sb_reserve(1); b[len++] = c.
+   append(int v) 0x42b1ed: sb_reserve(11); len += itoa(v, b+len).
+   append(long v) 0x42b244: sb_reserve(11) ONLY; len += ltoa(lo,hi, b+len)  -- can overrun.
+   All appends return 1 word (args[0] = this, unchanged).
+   length 0x42b17d: pstr->len.  capacity 0x42ae20: array->blocksize - 0x14.
+   toString 0x42ae4e: new String; s->array = clone(sb->array) (OOM -> OutOfMemoryError 0xf2f8aa1c);
+        pin++; s->pstr = &s->array->count. */

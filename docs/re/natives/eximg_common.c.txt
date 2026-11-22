@@ -1,0 +1,159 @@
+/* exen native imaging core: shared structs, helpers, per-depth ops tables.
+ * Source: gensimu.exe (image base 0x400000). Addresses are VAs.
+ * Confidence: high unless marked.
+ */
+
+/* ---- VM object layout seen by natives ------------------------------------
+ * Every VM object has a 0x18-byte header; instance field i lives at +0x18+4*i.
+ * Arrays: u16 length at +0x12, payload at +0x14 (byte[]/char[] = 1 byte/elem,
+ * int[] = 4 bytes/elem). char[] is stored as bytes (8-bit chars).
+ *
+ * Native calling convention (dispatcher 0x407a94, table 0x457c08):
+ *   u16 native(u32 *args, Obj *self);
+ *   args[0] = receiver ref (instance methods), args[1..] = declared args.
+ *   self    = resolved receiver object pointer.
+ *   Return value of the C function = number of result words written to args[0].
+ */
+
+/* exen.Graphics instance fields (from class 0x449640) */
+struct Graphics {            /* VM object */
+    u8   hdr[0x18];
+    Obj *pixIma;             /* +0x18 exen.Image target */
+    u32  curColorIDX;        /* +0x1c only low byte used */
+    u32  curPaintMode;       /* +0x20 low u16 used; IGNORED by all 8bpp/4bpp ops (see below) */
+    s32  clipX, clipY, clipWidth, clipHeight;   /* +0x24..+0x30 */
+};
+
+/* exen.Image instance fields (class 0x44a098) */
+struct Image {
+    u8   hdr[0x18];
+    s32  width, height, depth;  /* +0x18 +0x1c +0x20 */
+    Obj *image_Data;            /* +0x24 byte[] pixel storage */
+    Obj *image_imgT;            /* +0x28 byte[] holding the native EXimg struct at +0x14 */
+    Obj *palette;               /* +0x2c exen.Palette */
+};
+/* exen.Palette instance fields (class 0x44ae78): paletteVersion (+0x18), colorTabRGBA int[] (+0x1c).
+ * Palette entries are 0xAARRGGBB. */
+
+/* Native image struct, size 0x58 (Image.getSizeOfEXimgStruct, 0x426210). Lives inside
+ * Image.image_imgT byte array. */
+struct EXimg {
+    u8   *data;        /* +0x00 pixel bytes; re-synced to image_Data+0x14 on every access (0x426785) */
+    s32   w;           /* +0x04 */
+    s32   h;           /* +0x08 */
+    s32   size;        /* +0x0c bytes = pitch*h */
+    s32   depth;       /* +0x10 4 or 8 (1 => no ops table, unusable) */
+    s32   pitch;       /* +0x14 8bpp: w ; 4bpp: (w+1)/2 */
+    s32   clipX, clipY, clipW, clipH;  /* +0x18..+0x24 copied from Graphics before each op */
+    const OpsTable *ops;               /* +0x28 per-depth vtable (0x42d3b0/0x4034e7) */
+    s32   blitMode;    /* +0x2c 0x10/0x20/0x30/0x40/0x50 (high nibble only) */
+    void (*setBlitMode)(EXimg*, int mode);   /* +0x30 4bpp:0x418f00 8bpp:0x41a2a0 */
+    void (*setBlitMode8)(EXimg*, int mode);  /* +0x34 always 0x41a2a0 */
+    BlitFn blit;       /* +0x38 unscaled row blitter for current blitMode */
+    ScaleFn blitScaled;/* +0x3c scaled blitter */
+    u32   transpIdx;   /* +0x40 transparent colour (index, or RGB332 for raw images) */
+    u32  *pal;         /* +0x44 palette (0xAARRGGBB) or NULL */
+    u32   palCount;    /* +0x48 */
+    u32  *palVersion;  /* +0x4c points at Palette.paletteVersion (LUT cache key) or NULL */
+    u32   alphaMode;   /* +0x50 setPaletteAlpha flag */
+    u32   _54;         /* +0x54 set to 1 by init */
+};
+
+/* getImage (0x426785): Image obj -> EXimg*, NULL if image_imgT or image_Data is null.
+ *   e = image_imgT + 0x14;  e->data = image_Data + 0x14 + getManufDisplayHeaderSize() (=0, 0x4022c4). */
+
+/* syncClip (0x425650): copy Graphics.clip* into e->clip*, then e->ops->setPaintMode(curPaintMode). */
+
+/* ---- ops tables ------------------------------------------------------------
+ * global ctx = *(void**)0x45ff3c ; ctx->opsByDepth (+0x4c) = { [0]=0x45bca8 (4bpp),
+ *   [1]=0x45bcf8 (8bpp), [2]=0x456018, [3]=font object (0x413a40) }   (init 0x403400)
+ * depth 4 -> 0x45bca8, depth 8 -> 0x45bcf8, anything else -> NULL (0x4034e7).
+ *
+ * slot off  ops4      ops8      meaning
+ *  0  0x00 0x42b36d  0x42bb4d  init(e,w,h): set w,h,pitch,size, clip=full, setBlitMode(0x10);
+ *                              8bpp also memset(data,0xFF,size)  (new 8bpp images are white)
+ *  1  0x04 0x42b415  0x42bbfd  load from resource (PNG path)
+ *  2  0x08 0x42b42f  0x42bcd4  create/alloc
+ *  3  0x0c 0x42b515  0x42bdb3  import 1bpp raw bitmap (TransformBlackAndWhiteBitmap)
+ *  4  0x10 0x42b6cd  0x42bf7e  putPixel(e,x,y,c)     8bpp: data[y*pitch+x]=c
+ *  5  0x14 0x42b737  0x42bfb2  getPixel(e,x,y)       8bpp: return data[y*pitch+x]
+ *  6  0x18 0x42b796  0x42bfd9  hline(e,x,y,len,c)    memset
+ *  7  0x1c 0x42b977  0x42c26c  fillRect(e,rect*,c)   memset per row (4bpp: nibble-aware)
+ *  8  0x20 0x42b880  0x42c017  bresenham inner loop
+ *  9  0x24 stub(1)   0x42c0be  textured span
+ * 10  0x28 0x42bac5  0x42c2e1  clear
+ * 11  0x2c stub      0x42c32b  -> base[0x457f34]
+ * 12  0x30 stub(1)   0x42c351  setPaintMode -> base[0x457f38]=0x42d46d `return 1`  => NO-OP
+ * 13  0x34 stub(1)   0x42c363  blit unscaled with transform (drawImage, w/h equal)
+ * 14  0x38 stub(1)   0x42ca5b  blit scaled, nearest neighbour, no transform
+ * 15  0x3c 0x42bb28  0x42d373  rgbToColor: 4bpp returns -1 ; 8bpp RGB332
+ * 16  0x40 lazily = 0x457ef0 (base/stub table, all `return 1`)
+ * 17  0x44 noop      0x42ccc4  raycaster vertical slice (RayCast, out of scope)
+ * 18  0x48 ->base    ->base
+ * => 4bpp images can be blit SOURCES only; drawing images/textures onto a 4bpp image does nothing.
+ * => Paint modes (PM_COPY/XOR/...) have no effect anywhere: every op does plain stores.
+ */
+
+/* RGB -> RGB332 (8bpp slot 15, 0x42d373; same formula in 0x42d279, PNG decode) */
+static inline u8 rgb332(u32 rgb) {
+    return ((rgb >> 16) & 0xE0) | ((rgb >> 11) & 0x1C) | ((rgb >> 6) & 0x03);
+}
+
+/* Palette -> RGB332 lookup table, cached (0x42d279).
+ * ctx20 = *(ctx+0x20) (display/manuf struct); lut = ctx20->lut (+0x0c, 256 bytes);
+ * cacheKey = ctx20->lutVersion (+0x10). */
+u8 *paletteLUT(EXimg *src) {
+    if (src->palCount == 0) return NULL;              /* callers then deref NULL! (texture span) */
+    if (src->palVersion && *src->palVersion == ctx20->lutVersion) return ctx20->lut;
+    u8 *o = ctx20->lut;
+    for (u32 i = 0; i < src->palCount; i++) o[i] = rgb332(src->pal[i]);
+    if (src->palVersion) ctx20->lutVersion = *src->palVersion;
+    return ctx20->lut;
+}
+/* NOTE: one global LUT. If a palette has no palVersion (palette set natively by PNG decode and
+ * never migrated to Java) the LUT is rebuilt on every blit. Two different palettes that share the
+ * same paletteVersion value would alias (version is per-Palette counter; low risk). */
+
+/* Graphics.setColor(r,g,b)  native 14 @0x426196 -> 0x418bbc */
+void Graphics_setColor(u32 *args, Graphics *g) {
+    if (!g->pixIma) return;
+    u32 rgb = (args[1] << 16) | (args[2] << 8) | args[3];   /* NOT masked: r,g,b >255 bleed */
+    EXimg *e = imgT(g->pixIma);  if (!e) return;            /* NB: does not sync data ptr */
+    u32 idx;
+    if (e->pal) {                       /* nearest palette entry, squared RGB distance */
+        u32 best = 0xFFFFFFFF; idx = 0;
+        for (u32 i = 0; i < e->palCount; i++) {
+            int dr = R(rgb)-R(e->pal[i]), dg = G(rgb)-G(e->pal[i]), db = B(rgb)-B(e->pal[i]);
+            u32 d = dr*dr + dg*dg + db*db;
+            if (best == 0xFFFFFFFF) best = d;          /* first entry: best=d, idx stays 0 */
+            else if (d < best) { best = d; idx = i; }  /* strict <: first minimum wins */
+        }
+    } else idx = e->ops->rgbToColor(rgb);   /* 8bpp: RGB332 ; 4bpp: 0xFFFFFFFF */
+    g->curColorIDX = idx;                   /* only low byte is ever used */
+}
+
+/* Graphics.setClip(x,y,w,h) native 11 @0x426096 */
+void Graphics_setClip(u32 *a, Graphics *g) {
+    EXimg *e = getImage(g->pixIma);
+    Rect r = {0, 0, e->w, e->h};
+    rectIntersect(&r, &(Rect){a[1],a[2],a[3],a[4]});   /* 0x4177c6, clips first arg */
+    if (r.w < 0) r.w = 0;  if (r.h < 0) r.h = 0;
+    g->clipX=r.x; g->clipY=r.y; g->clipWidth=r.w; g->clipHeight=r.h;
+}
+/* rectIntersect(dst,src) 0x4177c6: half-open boxes; x'=max, w reduced by overshoot on each side.
+ * Result w/h may go negative (setClip clamps; fillRect rejects w<=0||h<=0). */
+
+/* clearRect(x,y,w,h) native 0: fillRectCore(e,x,y,w,h, color=0xFF, mode=1) -- always index/RGB332 0xFF (white).
+ * fillRect(x,y,w,h)  native 7: fillRectCore(e,x,y,w,h, curColorIDX&0xFF, curPaintMode&0xFF).
+ * fillRectCore 0x417d92: r={x,y,w,h} ∩ clip; if w<=0||h<=0 return -5; ops->setPaintMode(mode) (no-op);
+ *                        ops->fillRect(e,&r,color). No width/height+1: fills exactly w*h. */
+
+/* setPixel(x,y,c) native 9 -> 0x417f1d: c = args[3]&0xFF raw colour (NOT curColor);
+ *   if clipX<=x<clipX+clipW && clipY<=y<clipY+clipH: ops->putPixel.
+ * getPixel(x,y)  native 10 -> 0x417f97: returns raw byte (RGB332 on raw 8bpp, index on paletted,
+ *   nibble on 4bpp) or -5 (0xFFFFFFFB) when outside the CLIP rect (not image bounds).
+ */
+
+/* setNormalVideo() native 12 / setInverseVideo() native 13 (0x426172/0x426184):
+ *   0x4022f1(1 / 0): ctx20->normalVideo (+0x24 byte) = 1 / 0.  Pure display flag; drawing unaffected.
+ *   (Consumed by the display-update path, not by these natives.)                     conf medium */
