@@ -1,0 +1,42 @@
+# Software Information
+display_name = "In-Fusio ExEn (exen-reloaded)"
+authors = "exen-reloaded contributors"
+supported_extensions = "exn"
+corename = "exen-reloaded"
+categories = "Emulator"
+license = "See the project repository"
+permissions = ""
+display_version = "0.1.0-dev"
+
+# Hardware Information
+manufacturer = "In-Fusio"
+systemname = "ExEn"
+systemid = "exen"
+
+# Libretro Features
+supports_no_game = "false"
+savestate = "true"
+savestate_features = "deterministic"
+cheats = "false"
+input_descriptors = "true"
+memory_descriptors = "false"
+libretro_saves = "true"
+core_options = "true"
+core_options_version = "2.0"
+load_subsystem = "false"
+hw_render = "false"
+needs_fullpath = "false"
+disk_control = "false"
+is_experimental = "true"
+
+# Firmware / BIOS
+firmware_count = 2
+firmware0_desc = "gensimu.exe (In-Fusio EXEN-V2 Generic Simulator; the ExEn framework is loaded from it)"
+firmware0_path = "gensimu.exe"
+firmware0_opt = "false"
+firmware1_desc = "flash/eeprom.dat (the simulator's EEPROM defaults: nickname, currency, SMS prices)"
+firmware1_path = "flash/eeprom.dat"
+firmware1_opt = "true"
+notes = "gensimu.exe and flash/eeprom.dat are in exen-reloaded's vendor/gensimu/; both may also go in an exen/ subfolder of the system directory.|Suggested md5sum:|f102c98717b4d680f9a38199fb3c0421 = gensimu.exe|5ed31fb2d62d0a19cd9e4b3aa0f30c3b = flash/eeprom.dat"
+
+description = "A portable reimplementation of In-Fusio's ExEn platform, which ran Java-like bytecode games on European feature phones in 2002-2004. It runs the ExEn framework bytecode taken from the original SDK simulator, so that file is required in the system directory."

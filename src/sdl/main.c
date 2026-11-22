@@ -25,6 +25,7 @@
 
 #include "exen.h"
 #include "input.h"
+#include "rgb332.h"
 #include "paths.h"
 #include "persist.h"
 
@@ -80,12 +81,7 @@ static void set_title(App *a, const char *name, ExenVM *vm)
 
 static void build_lut(App *a)
 {
-    for (int p = 0; p < 256; p++) {
-        /* EXManufDisplayUpdate (0x4342f0): channel * 36.4286 (3-bit) or * 85.0 (2-bit), truncated */
-        uint32_t r = (uint32_t)((p >> 5) * 36.4286), g = (uint32_t)(((p >> 2) & 7) * 36.4286),
-                 b = (uint32_t)((p & 3) * 85.0);
-        a->lut[p] = 0xff000000u | r << 16 | g << 8 | b;
-    }
+    exen_rgb332_lut(a->lut); /* EXManufDisplayUpdate (0x4342f0), shared with the libretro core */
 }
 
 static void on_present(void *u, const uint8_t *px, int w, int h)

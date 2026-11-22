@@ -125,6 +125,15 @@ The headless runner can test both: `exen-run --eeprom-out FILE` writes the EEPRO
 `--save-at N FILE` and `--load FILE` save and resume states, and `--selftest-state` checks that
 a state round trip reproduces the same frames, audio and final state.
 
+## libretro core
+
+exen-reloaded also builds as a libretro core for RetroArch and other frontends
+(`-DEXEN_BUILD_LIBRETRO=ON`, giving `exen_reloaded_libretro`). Copy `vendor/gensimu/gensimu.exe`
+(and optionally `vendor/gensimu/flash/eeprom.dat`, as `flash/eeprom.dat`) into the frontend's
+system directory and load a `.exn`. It supports save files (the EEPROM), save states, rewind,
+run-ahead, core options for the screen size and sound, and the same pad layout as above. See
+[docs/LIBRETRO.md](docs/LIBRETRO.md).
+
 ## Legal
 
 exen-reloaded is an independent reimplementation written for interoperability and game

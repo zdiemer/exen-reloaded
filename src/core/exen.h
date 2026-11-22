@@ -145,6 +145,12 @@ void exen_eeprom_reset(ExenVM *vm, const uint8_t *defaults, size_t len);
  * with the restored screen, and eeprom_changed. Host settings are kept: audio volume, and the
  * output rate (sequencer timing is converted if the rate differs). */
 size_t exen_state_size(ExenVM *vm);
+/* An upper bound on exen_state_size for every state this VM can ever produce, given the loaded
+ * game: it depends only on the configuration and the loaded classes, so it stays constant for
+ * the VM's lifetime (0 before exen_load_game). For frontends that need one fixed state size,
+ * such as libretro's retro_serialize_size. Mostly the heap's worst case (several MiB with the
+ * default heap); actual states are far smaller. */
+size_t exen_state_max_size(ExenVM *vm);
 int exen_state_save(ExenVM *vm, void *buf, size_t cap);
 int exen_state_load(ExenVM *vm, const void *buf, size_t len);
 

@@ -54,22 +54,11 @@ static void expand(uint8_t px, uint8_t *o)
     o[2] = (uint8_t)(b << 6 | b << 4 | b << 2 | b);
 }
 
-int png_write_rgb332(const char *path, const uint8_t *px, int w, int h, int scale)
+/* Write W x H RGB rows already laid out in `raw` (filter byte + 3 bytes per pixel each) as a
+ * PNG; frees `raw`. */
+static int write_rgb_rows(const char *path, uint8_t *raw, size_t raw_len, int W, int H)
 {
-    if (scale < 1)
-        scale = 1;
     crc_init();
-    int W = w * scale, H = h * scale;
-    size_t row = 1 + (size_t)W * 3, raw_len = row * (size_t)H;
-    uint8_t *raw = malloc(raw_len);
-    if (!raw)
-        return -1;
-    for (int y = 0; y < H; y++) {
-        uint8_t *r = raw + (size_t)y * row;
-        r[0] = 0; /* filter: none */
-        for (int x = 0; x < W; x++)
-            expand(px[(size_t)(y / scale) * (size_t)w + (size_t)(x / scale)], r + 1 + 3 * (size_t)x);
-    }
     /* zlib stream of stored blocks */
     size_t nblk = raw_len / 65535 + 1;
     size_t z_len = 2 + raw_len + 5 * nblk + 4;
@@ -121,4 +110,44 @@ int png_write_rgb332(const char *path, const uint8_t *px, int w, int h, int scal
     if (fclose(f) != 0)
         ok = 0;
     return ok ? 0 : -1;
+}
+
+int png_write_rgb332(const char *path, const uint8_t *px, int w, int h, int scale)
+{
+    if (scale < 1)
+        scale = 1;
+    int W = w * scale, H = h * scale;
+    size_t row = 1 + (size_t)W * 3, raw_len = row * (size_t)H;
+    uint8_t *raw = malloc(raw_len);
+    if (!raw)
+        return -1;
+    for (int y = 0; y < H; y++) {
+        uint8_t *r = raw + (size_t)y * row;
+        r[0] = 0; /* filter: none */
+        for (int x = 0; x < W; x++)
+            expand(px[(size_t)(y / scale) * (size_t)w + (size_t)(x / scale)], r + 1 + 3 * (size_t)x);
+    }
+    return write_rgb_rows(path, raw, raw_len, W, H);
+}
+
+int png_write_xrgb8888(const char *path, const uint32_t *px, int w, int h, int scale)
+{
+    if (scale < 1)
+        scale = 1;
+    int W = w * scale, H = h * scale;
+    size_t row = 1 + (size_t)W * 3, raw_len = row * (size_t)H;
+    uint8_t *raw = malloc(raw_len);
+    if (!raw)
+        return -1;
+    for (int y = 0; y < H; y++) {
+        uint8_t *r = raw + (size_t)y * row;
+        r[0] = 0; /* filter: none */
+        for (int x = 0; x < W; x++) {
+            uint32_t c = px[(size_t)(y / scale) * (size_t)w + (size_t)(x / scale)];
+            r[1 + 3 * (size_t)x] = (uint8_t)(c >> 16);
+            r[2 + 3 * (size_t)x] = (uint8_t)(c >> 8);
+            r[3 + 3 * (size_t)x] = (uint8_t)c;
+        }
+    }
+    return write_rgb_rows(path, raw, raw_len, W, H);
 }
