@@ -3,6 +3,7 @@
 
     python tools/harness/compat.py run  [GAMES_DIR] --out OUT [--jobs N] [--only NAME...]
     python tools/harness/compat.py page --out OUT                 # (re)write OUT/COMPATIBILITY.md
+    python tools/harness/compat.py publish --out OUT --repo OWNER/NAME   # one issue per game
 
 GAMES_DIR defaults to $EXEN_GAMES_DIR. For every .exn the sweep runs build/exen-run twice:
   * idle:  no input, to see what the game does by itself (boot, attract loop)
@@ -215,7 +216,8 @@ def cmd_run(args) -> int:
     for r in results:
         prev[r["game"]] = r
     allres = sorted(prev.values(), key=lambda r: r["game"].lower())
-    rep.write_text(json.dumps({"generated": time.strftime("%Y-%m-%d"), "games": allres}, indent=1))
+    rep.write_text(json.dumps({"generated": time.strftime("%Y-%m-%d"), "games": allres}, indent=1) + "\n",
+                   encoding="utf-8", newline="\n")
     for r in results:
         print(f"{r['game'][:24]:24} {r['size']:8} {r['tier']:12} {r['group']:22} "
               f"screens={r['distinct_screens']:2}/{r['screens_from_input']:2} {r['status'][:50]}")
@@ -270,7 +272,7 @@ def write_page(out: Path, games: list[dict]) -> None:
         lines.append(f"| {g['game']} | `{g['tier']}` | {g['size']} | "
                      f"{'' if g['tier'] == 'playable' else '`' + g['group'] + '`'} | "
                      f"[shot](shots/{g['slug']}.png) · [clip](clips/{g['slug']}.gif) |")
-    (out / "COMPATIBILITY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out / "COMPATIBILITY.md").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 def cmd_page(args) -> int:
@@ -279,9 +281,86 @@ def cmd_page(args) -> int:
     return 0
 
 
+TIER_TEXT = {
+    "playable": "This game runs: it responds to input and reaches several distinct screens "
+                "without the VM stopping. Tracked here so regressions have somewhere to land.",
+    "renders": "The game draws real screens, but the generic key script got no response. It may "
+               "need different keys; check the clip.",
+    "black": "Frames were presented, but every sampled frame was a single flat colour.",
+    "crashed": "The VM stopped after the game had started.",
+    "incompatible": "The game never presented a frame.",
+}
+
+
+def issue_body(g: dict, repo: str) -> str:
+    raw = f"https://github.com/{repo}/blob/main"
+    rows = [("Tier", f"`{g['tier']}`"), ("Cause", f"`{g['group']}`"),
+            ("Screen", g["size"]), ("VM status after the input run", f"`{g['status']}`"),
+            ("Frames presented", g["presented"]), ("Timer ticks", g["ticks"]),
+            ("Tick period", f"{g['period_ms']} ms"), ("Distinct screens", g["distinct_screens"]),
+            ("Screens reached only with input", g["screens_from_input"]),
+            ("Flat-colour frame ratio", g["flat_ratio"])]
+    body = [f"**Tier:** `{g['tier']}`  |  **Cause:** `{g['group']}`  |  **Screen:** {g['size']}", "",
+            f"![representative frame]({raw}/shots/{g['slug']}.png?raw=true)", "",
+            f"*Most detailed frame captured. Clip: [clips/{g['slug']}.gif]({raw}/clips/{g['slug']}.gif)*",
+            "", "## What happens", "", TIER_TEXT[g["tier"]], "", "## Run metrics", "",
+            "| Metric | Value |", "|---|---|"] + [f"| {k} | {v} |" for k, v in rows]
+    if g["unimplemented"]:
+        body += ["", "## Unimplemented natives hit", ""] + [f"- `{u}`" for u in g["unimplemented"]]
+    body += ["", "## Reproduce", "", "```sh",
+             f"build/exen-run --frames {INPUT_TICKS} --dump out/ \"$EXEN_GAMES_DIR/{g['file']}\"",
+             f"python tools/harness/compat.py run --only \"{g['game']}\" --out <compat repo>", "```"]
+    return "\n".join(body) + "\n"
+
+
+def gh(*args: str, input: str | None = None) -> str:
+    r = subprocess.run(["gh", *args], capture_output=True, text=True, input=input, encoding="utf-8")
+    if r.returncode:
+        raise SystemExit(f"gh {' '.join(args[:3])}: {r.stderr.strip()}")
+    return r.stdout
+
+
+def cmd_publish(args) -> int:
+    """One issue per game in the compat repo: created, or edited in place when it exists.
+    Labels: status:<tier> and group:<cause>; the issue title carries the tier."""
+    repo, out = args.repo, Path(args.out)
+    games = json.loads((out / "report.json").read_text())["games"]
+    colours = {"playable": "0e8a16", "renders": "fbca04", "black": "5319e7", "crashed": "d93f0b",
+               "incompatible": "b60205"}
+    for t, c in colours.items():
+        gh("label", "create", f"status: {t}", "-R", repo, "--color", c, "--force")
+    for grp in sorted({g["group"] for g in games}):
+        gh("label", "create", f"group: {grp}", "-R", repo, "--color", "c5def5", "--force")
+    existing = json.loads(gh("issue", "list", "-R", repo, "--state", "all", "--limit", "1000",
+                             "--json", "number,title,labels"))
+    by_game = {i["title"].split(":")[0]: i for i in existing}
+    for g in games:
+        title = f"{g['game']}: {g['tier'].capitalize()}"
+        labels = [f"status: {g['tier']}", f"group: {g['group']}"]
+        body = issue_body(g, repo)
+        cur = by_game.get(g["game"])
+        if cur:
+            stale = [l["name"] for l in cur["labels"]
+                     if l["name"].startswith(("status: ", "group: ")) and l["name"] not in labels]
+            cmd = ["issue", "edit", str(cur["number"]), "-R", repo, "--title", title, "--body-file", "-",
+                   "--add-label", ",".join(labels)]
+            if stale:
+                cmd += ["--remove-label", ",".join(stale)]
+            gh(*cmd, input=body)
+            print(f"updated #{cur['number']} {title}")
+        else:
+            url = gh("issue", "create", "-R", repo, "--title", title, "--body-file", "-",
+                     "--label", ",".join(labels), input=body).strip()
+            print(f"created {url.rsplit('/', 1)[-1]} {title}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    pb = sub.add_parser("publish", help="create/update one issue per game in the compat repo")
+    pb.add_argument("--out", required=True)
+    pb.add_argument("--repo", required=True, help="owner/name of the compat repository")
     r = sub.add_parser("run")
     r.add_argument("games", nargs="?")
     r.add_argument("--out", required=True)
@@ -291,7 +370,7 @@ def main() -> int:
     p = sub.add_parser("page")
     p.add_argument("--out", required=True)
     a = ap.parse_args()
-    return cmd_run(a) if a.cmd == "run" else cmd_page(a)
+    return {"run": cmd_run, "page": cmd_page, "publish": cmd_publish}[a.cmd](a)
 
 
 if __name__ == "__main__":
