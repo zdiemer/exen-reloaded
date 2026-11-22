@@ -24,14 +24,16 @@ All integers little-endian.
 
 | Tag | Seen as | Notes |
 |---|---|---|
-| `0x0d` | image | `u16 w, u16 h, u16 ?` then a standard PNG stream (palettised) |
+| `0x0d` | image | `u16 w, u16 h, u16 stream length`, then an "ExEn PNG": PNG signature and chunks without CRCs or IEND, whose IDAT uses one of In-Fusio's codecs rather than zlib ([`docs/re/CODECS.md`](re/CODECS.md)). A type-0x0d resource that is not PNG is read as a raw 1-bpp bitmap at offset 6. Resources are padded to 4 bytes. |
+| `0x01` | 1-bpp bitmap | `u16 w, u16 h`, then `((w+7)>>3)*h` bytes |
+| `0x81` | packed 1-bpp bitmap | as `0x01`, but the bitmap bytes are codec-packed (`exen.Resource.readBytes` unpacks them) |
 | `0x06` | ? | most common after images; guess: animation / tile data |
 | `0x0e` | ? | |
 | `0x03` | ? | |
 | `0x0f` | ? | usually exactly one per game |
 | `0x04` | melody? | BombJack, Tomb Raider: arrays of `(note, duration)`-looking u8 pairs |
 | `0xff` | empty | zero-length placeholder |
-| `0xd0`–`0xda`, `0x81` | ? | only in the later In-Fusio titles (IFSki*, Pikubi*, MonkeyBusiness, IFSudoku) |
+| `0xd0`–`0xda` | ? | only in the later In-Fusio titles (IFSki*, Pikubi*, MonkeyBusiness, IFSudoku) |
 
 The authoritative decoder is `exen.Resource` in the framework (`getResourceType`, `readImage`,
 `readAnimation`, `readPlayField`, `readSound`, `getString`); fill this table in from it.
