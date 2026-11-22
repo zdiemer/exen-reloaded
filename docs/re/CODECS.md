@@ -269,12 +269,14 @@ ShadoFighter 17/29, Spyro 45, TourDeFrance 32, Worms 37 and ZooTycoon2 22/38/57.
 effect is stray pixels. For ShadoFighter 29 (the flame), the bottom ~15 rows become
 transparent. The clean decode is evidently what the artists drew. **The port decodes into a
 separate buffer and so does not reproduce this.** A pixel-exact match with the simulator would
-need its staging layout and its heap contents past the buffer; it is left as an open question.
+need its staging layout and its heap contents past the buffer.
+
+**Decision (2026-11-22, project owner):** decode cleanly and show the art as drawn. The
+corruption is an artefact of the simulator, not of the games.
 
 ## Open items
 
 - Codec 4 has never been seen in a real game.
-- Whether to reproduce the in-place corruption above (current choice: no).
 - Bit depths 1 and 2 in PNG IHDR and truecolour images (the simulator draws "True color PNG not
   supported" into them) do not occur in the corpus. The port returns
   `EXEN_CODEC_ERR_UNSUPPORTED` for non-indexed images.

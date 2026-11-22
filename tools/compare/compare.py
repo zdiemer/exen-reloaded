@@ -48,6 +48,36 @@ VK = {"ok": 0x0D, "clear": 0x1B, "up": 0x26, "down": 0x28, "left": 0x25, "right"
 
 ZOOM = 2  # simulator.ini ZoomRatio
 FPS = 10
+MATCH = 6.0         # mean abs RGB difference (0-255) for two screens to count as the same
+KEY_TIMEOUT = 60.0  # seconds to wait for a matching screen before pressing anyway
+REF_WINDOW = 0.6    # seconds of exen frames before a press that define its screen
+SLOWDOWN = 4.0      # assumed gensimu slowdown for keys whose screen never matches
+
+
+def distance(a: Image.Image, b: Image.Image) -> float:
+    sa, sb = a.resize((48, 48), Image.BOX), b.resize((48, 48), Image.BOX)
+    da, db = sa.tobytes(), sb.tobytes()
+    return sum(abs(x - y) for x, y in zip(da, db)) / len(da)
+
+
+class Signature:
+    """What identifies a screen: the pixels that stay constant over a window of frames.
+    Animated backgrounds, scrolling and blinking differ in phase between the two emulators,
+    so only the stable part (text, logos, static UI) is compared."""
+
+    def __init__(self, frames: list[Image.Image], size: tuple[int, int]):
+        self.size = size
+        native = [f.resize(size, Image.NEAREST).tobytes() for f in frames]
+        self.ref = native[-1] if native else b""
+        n = size[0] * size[1]
+        self.mask = [i for i in range(n)
+                     if all(f[3 * i:3 * i + 3] == self.ref[3 * i:3 * i + 3] for f in native)] if native else []
+        self.usable = len(native) >= 3 and len(self.mask) >= n // 50
+
+    def distance(self, img: Image.Image) -> float:
+        b = img.resize(self.size, Image.NEAREST).tobytes()
+        r = self.ref
+        return sum(abs(b[3 * i + c] - r[3 * i + c]) for i in self.mask for c in range(3)) / (3 * len(self.mask))
 
 
 def parse_keys(spec: str) -> list[tuple[int, str, int]]:
@@ -67,7 +97,10 @@ def is_games_menu(img: Image.Image) -> bool:
     return abs(px[0] - 0) < 30 and abs(px[1] - 0x66) < 40 and abs(px[2] - 0x66) < 40
 
 
-def record_gensimu(game: Path, size: tuple[int, int], seconds: float, keys, work: Path):
+def record_gensimu(game: Path, size: tuple[int, int], seconds: float, keys, work: Path, tail: float = 5.0):
+    """keys: (ms, name, hold_ms, reference images). A key is pressed once the screen matches
+    any of its reference frames (or at its time if it has none, or after KEY_TIMEOUT). Several
+    references cover animated screens, whose phase differs between the two emulators."""
     sim = work / "gensimu"
     shutil.copytree(ROOT / "vendor/gensimu", sim)
     ini = sim / "simulator.ini"
@@ -91,21 +124,37 @@ def record_gensimu(game: Path, size: tuple[int, int], seconds: float, keys, work
         t0 = time.time()
         frames, pending = [], list(keys)
         releases: list[tuple[float, int]] = []
+        presses: list[float] = []
+        matched: list[bool] = []
+        waited_since = 0.0
         while (now := time.time() - t0) < seconds:
             ms = now * 1000
-            while pending and pending[0][0] <= ms:
-                _, name, hold = pending.pop(0)
-                winsnap.post_key(hwnd, VK[name], True)
-                releases.append((ms + hold, VK[name]))
+            if proc.poll() is not None:
+                break
+            img = winsnap.grab_client(hwnd).crop((0, 0, size[0] * ZOOM, size[1] * ZOOM))
+            frames.append((now, img))
+            if pending:
+                sig = pending[0][3]
+                # never sooner after the previous press than exen-reloaded was (gensimu is slower)
+                ready = now - waited_since >= pending[0][5]
+                due = ready and ((sig is not None and sig.usable and sig.distance(img) < MATCH) or
+                                 (now - waited_since > pending[0][4]))
+                if due:
+                    matched.append(bool(sig is not None and sig.usable and sig.distance(img) < MATCH))
+                    _, name, hold, _, _, _ = pending.pop(0)
+                    winsnap.post_key(hwnd, VK[name], True)
+                    releases.append((ms + hold, VK[name]))
+                    presses.append(now)
+                    waited_since = now
             for r in [r for r in releases if r[0] <= ms]:
                 winsnap.post_key(hwnd, r[1], False)
                 releases.remove(r)
-            if proc.poll() is not None:
+            if not pending and not releases and presses and now - presses[-1] > tail:
                 break
-            img = winsnap.grab_client(hwnd)
-            frames.append((now, img.crop((0, 0, size[0] * ZOOM, size[1] * ZOOM))))
             time.sleep(max(0.0, 1 / FPS - (time.time() - t0 - now)))
-        return frames, proc.poll() is not None
+        frames_presses = presses
+        print(f"gensimu: {sum(matched)} of {len(matched)} keys pressed on a screen match, the rest on the timed fallback")
+        return frames, frames_presses, proc.poll() is not None
     finally:
         proc.kill()
 
@@ -129,7 +178,8 @@ def record_exen(exen_run: Path, game: Path, size, seconds: float, keys, work: Pa
         tick = int(re.search(r"_t(\d+)", p.name).group(1))
         frames.append((tick * period / 1000, Image.open(p).convert("RGB").resize((w * ZOOM, h * ZOOM), Image.NEAREST)))
     status = re.search(r"status: (.*)", res.stdout)
-    return frames, period, status.group(1) if status else "?"
+    presses = [max(1, ms // period) * period / 1000 for ms, _, _ in keys]
+    return frames, presses, period, status.group(1) if status else "?"
 
 
 def at(frames, t, size):
@@ -159,6 +209,37 @@ def compose(gs, ex, size, seconds, path: Path, labels):
     out[0].save(path, save_all=True, append_images=out[1:], duration=int(1000 / FPS), loop=0, optimize=True)
 
 
+def warp(frames, presses, other_presses, t):
+    """Map time t on the reference (exen) timeline to this stream's timeline, segment by
+    segment between key presses, so both sides show the same content at once."""
+    a = [0.0] + list(other_presses)
+    b = [0.0] + list(presses)
+    n = min(len(a), len(b))
+    for i in range(n - 1, -1, -1):
+        if t >= a[i]:
+            if i + 1 < n:
+                span_a, span_b = a[i + 1] - a[i], b[i + 1] - b[i]
+                return b[i] + (t - a[i]) * (span_b / span_a if span_a > 0 else 1)
+            return b[i] + (t - a[i])
+    return t
+
+
+def compose_synced(gs, gs_presses, ex, ex_presses, size, seconds, path: Path):
+    w, h = size[0] * ZOOM, size[1] * ZOOM
+    pad, top = 8, 16
+    out = []
+    for i in range(int(seconds * FPS)):
+        t = i / FPS
+        frame = Image.new("RGB", (w * 2 + pad * 3, h + top + pad), (24, 24, 28))
+        d = ImageDraw.Draw(frame)
+        d.text((pad, 2), "gensimu (time-aligned)", fill=(220, 220, 220))
+        d.text((w + pad * 2, 2), "exen-reloaded", fill=(220, 220, 220))
+        frame.paste(at(gs, warp(gs, gs_presses, ex_presses, t), (w, h)), (pad, top))
+        frame.paste(at(ex, t, (w, h)), (w + pad * 2, top))
+        out.append(frame)
+    out[0].save(path, save_all=True, append_images=out[1:], duration=int(1000 / FPS), loop=0, optimize=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("game", type=Path)
@@ -166,6 +247,8 @@ def main() -> int:
     ap.add_argument("--size", default="101x80")
     ap.add_argument("--seconds", type=float, default=20)
     ap.add_argument("--keys", default="")
+    ap.add_argument("--gensimu-seconds", type=float, default=180,
+                    help="max wall time for the gensimu recording (it runs slower)")
     ap.add_argument("--exen-run", type=Path, default=ROOT / "build/exen-run.exe")
     a = ap.parse_args()
     size = tuple(int(v) for v in a.size.split("x"))
@@ -174,11 +257,29 @@ def main() -> int:
     keys = parse_keys(a.keys)
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        gs, gs_died = record_gensimu(a.game.resolve(), size, a.seconds, keys, work)
-        ex, period, status = record_exen(a.exen_run, a.game.resolve(), size, a.seconds, keys, work)
+        ex, ex_presses, period, status = record_exen(a.exen_run, a.game.resolve(), size, a.seconds, keys, work)
+        # reference frame for each key: what exen-reloaded showed just before the press
+        # reference frames for each key: what exen-reloaded showed in the REF_WINDOW before it
+        prev = [0.0] + ex_presses[:-1]
+        # fallback when nothing matches (e.g. gameplay, which diverges): press after the exen gap
+        # scaled by SLOWDOWN, counted from the previous press
+        refs = [(ms, name, hold,
+                 Signature([img for ft, img in ex if max(p, t - REF_WINDOW) <= ft < t], size),
+                 min(KEY_TIMEOUT, max(3.0, SLOWDOWN * (t - p))), t - p)
+                for (ms, name, hold), t, p in zip(keys, ex_presses, prev)]
+        for (ms, name, _, sig, _, _) in refs:
+            print(f"key {name}@{ms}ms: {len(sig.mask)} stable px{'' if sig.usable else ' (unusable: timed fallback)'}")
+        tail = max(3.0, a.seconds - ex_presses[-1]) if ex_presses else a.seconds
+        gs, gs_presses, gs_died = record_gensimu(a.game.resolve(), size, a.gensimu_seconds, refs, work, tail)
         compose(gs, ex, size, a.seconds, a.out, ("gensimu (2003)", "exen-reloaded"))
-    print(f"{a.out}: {int(a.seconds * FPS)} frames; gensimu {len(gs)} captures"
-          f"{' (process exited)' if gs_died else ''}; exen {len(ex)} frames, period {period} ms, {status}")
+        synced = a.out.with_name(a.out.stem + "_synced" + a.out.suffix)
+        compose_synced(gs, gs_presses, ex, ex_presses, size, a.seconds, synced)
+    print(f"{a.out} (real time) and {synced} (time-aligned): gensimu {len(gs)} captures, "
+          f"{len(gs_presses)}/{len(keys)} keys pressed{' (process exited)' if gs_died else ''}; "
+          f"exen {len(ex)} frames, period {period} ms, {status}")
+    if gs_presses:
+        print("press times (s)  gensimu: " + " ".join(f"{t:.1f}" for t in gs_presses)
+              + "   exen: " + " ".join(f"{t:.1f}" for t in ex_presses))
     return 0
 
 
