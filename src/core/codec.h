@@ -14,8 +14,9 @@
  *   and uses that one instead of A and B.
  *
  * Type-0x0d image resources and type-0x81 packed resources (Resource.readBytes) both use these
- * codecs. Every 0x81 resource in the known corpus starts with 4 bytes that the game's bytecode
- * reads itself before calling readBytes, so its packed stream starts at offset 4.
+ * codecs. Type 0x01/0x81 resources are 1-bit bitmaps for Resource.readImage (framework bytecode,
+ * exen.Resource @0x1cc): `u16 w, u16 h`, then readBytes(((w + 7) >> 3) * h), which unpacks a
+ * 0x81 resource. So a 0x81 resource's packed stream starts at offset 4.
  */
 #ifndef EXEN_CODEC_H
 #define EXEN_CODEC_H
@@ -56,12 +57,14 @@ int exen_unpacked_size(const uint8_t *src, size_t src_len, size_t *size);
  * *out_len (may be NULL) receives the number of bytes written. */
 int exen_unpack(const uint8_t *src, size_t src_len, uint8_t *dst, size_t dst_cap, size_t *out_len);
 
-/* A decoded type-0x0d image.
+/* A decoded image.
  *
- * The resource is `u16 width, u16 height, u16 stream_len` (little-endian) followed by a PNG
- * signature and PNG-style chunks `[u32 BE length][4cc][data]` without CRCs. IHDR, PLTE and tRNS
- * have their PNG meaning; IDAT is one packed stream (see above), not zlib, and has no per-row
- * filter bytes. Decoding stops at the first IDAT, as in the simulator (0x41dacd). */
+ * A type-0x0d resource is `u16 width, u16 height, u16 stream_len` (little-endian) followed by a
+ * PNG signature and PNG-style chunks `[u32 BE length][4cc][data]` without CRCs. IHDR, PLTE and
+ * tRNS have their PNG meaning; IDAT is one packed stream (see above), not zlib, and has no
+ * per-row filter bytes. Decoding stops at the first IDAT, as in the simulator (0x41dacd).
+ * Without the PNG signature the simulator reads ((w + 7) >> 3) * h bytes after the 6-byte header
+ * as a raw 1-bit bitmap (decodeBitmap 0x418d0a); so does exen_image_decode (codec = 0). */
 typedef struct ExenDecodedImage {
     uint32_t width, height;     /* from IHDR */
     uint16_t res_width;         /* resource header u16 #0 (= width in the whole corpus) */
@@ -69,11 +72,12 @@ typedef struct ExenDecodedImage {
     uint16_t res_stream_len;    /* resource header u16 #2: byte length of the PNG stream */
     uint8_t bit_depth;          /* IHDR bit depth: 4 or 8 in the corpus */
     uint8_t color_type;         /* IHDR colour type: always 3 (indexed) */
-    uint8_t codec;              /* IDAT codec number 1..5 */
+    uint8_t codec;              /* IDAT codec number 1..5; 0 for a raw 1-bit bitmap */
     /* pixels[y * width + x] = palette index, one byte per pixel. For bit depth 4 the packed
      * rows are (width + 1) / 2 bytes with the left pixel in the high nibble; they are expanded
      * here. For bit depths 1 and 2 the simulator unpacks one byte per pixel (outSize = w * h)
-     * and so does this decoder; no game uses them. */
+     * and so does this decoder; no game uses them. 1-bit bitmaps (codec 0): rows of
+     * (width + 7) / 8 bytes, MSB = left pixel, expanded to 0/1, palette {black, white}. */
     uint8_t *pixels;
     /* The packed IDAT output exactly as the simulator holds it with keepPalette = true:
      * pitch * height bytes, pitch = (width + 1) / 2 for depth 4, else width. */
@@ -101,6 +105,14 @@ typedef struct ExenDecodedImage {
  * EXEN_CODEC_ERR_* otherwise. On success, release with exen_image_free. On failure nothing
  * needs freeing. */
 int exen_image_decode(const uint8_t *res, size_t len, ExenDecodedImage *out);
+
+/* Build an image from a 1-bit bitmap of `width` x `height` (rows of (width + 7) / 8 bytes, MSB
+ * first, 1 = white), as the simulator's import1bpp (0x42bdb3) does with keepPalette = true:
+ * index 0 = black, 1 = white. Used for raw type-0x0d bitmaps and for unpacked 0x01/0x81
+ * resources. Returns EXEN_CODEC_ERR_SHORT if len is too small. */
+int exen_image_from_1bpp(const uint8_t *bits, size_t len, uint32_t width, uint32_t height,
+                         ExenDecodedImage *out);
+
 void exen_image_free(ExenDecodedImage *img);
 
 #endif

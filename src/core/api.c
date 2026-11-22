@@ -9,6 +9,7 @@ int exen_find_framework(const uint8_t *exe, size_t len, size_t *off, size_t *siz
 int exen_finalize_classes(ExenVM *vm);
 int platform_init(ExenVM *vm, const ExenConfig *cfg);
 void platform_free(ExenVM *vm);
+void platform_set_font(ExenVM *vm, const uint8_t *bits);
 
 #define CODE_CAP (512u * 1024u)
 #define DEFAULT_HEAP (4u * 1024u * 1024u)
@@ -108,6 +109,12 @@ int exen_load_framework(ExenVM *vm, const uint8_t *exe, size_t len)
     }
     for (int i = 0; i < 513; i++)
         vm->math.cos_table[i] = rd16(exe + t + 2 * i);
+    /* the built-in 5x8 font (docs/re/natives/graphics_font.c.txt) */
+    if (va_to_file(exe, len, 0x454dd0u, &t) < 0 || t + 160 * 8 > len) {
+        set_error(vm, "font not found in simulator executable");
+        return -1;
+    }
+    platform_set_font(vm, exe + t);
     return 0;
 }
 

@@ -224,6 +224,41 @@ getCharWidth/getCharHeight are bytecode and are not in this range.
 - Nothing in this range explains a low framerate. Look at the display path
   (EXManufDisplayUpdate 0x4342f0 float/_ftol per pixel) and the host loop.
 
+#### Findings from the port (src/core/graphics.c)
+
+- **Image bytecode** (`tools/disasm.py` on exen.Image) [H]: `<init>(w,h,d)` allocates
+  `image_Data = new byte[getDataSize(w,h,d)]` with `getDataSize = ((w*d+7)>>3)*h +
+  getManufDisplayHeaderSize()`, then `image_imgT = new byte[getSizeOfEXimgStruct()]`, then calls
+  `Init(w,h,d)` and `setPalette(Palette.createPalette())`. `setPalette` stores the field and calls
+  `updateNativePaletteFromJavaPalette`. `Palette.createPalette()` makes a Palette whose
+  `colorTabRGBA` is **null** (and returns null outright when `numColors() == 2`), which is why
+  native 15 keeps mode 0x20 for a null table: raw RGB332 images keep their colour key.
+- **Image loading** [H]: `Resource.readImage(keep)` reads `u16 w, u16 h`. If `type & 0x7f == 1`
+  it reads `((w+7)>>3)*h` raw bytes and calls `createImageFromRawData(w,h,bytes,keep)`; otherwise
+  it reads the u16 stream length and calls `createImageFromRawData(w,h,this,keep)`, which decodes
+  at the resource cursor (just past the 6-byte header). Both helpers construct the Image with
+  `GetBitmapDepthFromResExed` (so raw 1bpp data becomes a **4bpp** image), call
+  `TransformBitmapFromResExed`, then: native palette size != 0 → `palette =
+  Palette.createPalette(n)` + `updateJavaPaletteFromNativePalette`; else keep →
+  `setPalette(createPalette(Gamelet.getPalette()))`; else `setPalette(createPalette())`.
+  `Resource.getImage(id)` uses keep = true, `getRawImage(id)` keep = false.
+- **ops4 import1bpp (0x42b515)** [H]: pitch = (w+1)/2; rows are byte aligned in the source; two
+  source bits make one output byte through a table: keep → {0x00,0x01,0x10,0x11} (indices 0/1 per
+  nibble), else {0x00,0x0f,0xf0,0xff}. keep sets a malloc'd palette {0x00000000, 0xffffffff},
+  palCount 2, mode 0x40; otherwise mode 0x10. Sets `+0x54 = 1`.
+- **4bpp setBlitMode (0x418f00)** [H]: stores `mode & 0xf0`; modes 0x10 and 0x20 call
+  `setBlitMode8`, i.e. the 8bpp row blitters, which read whole bytes of the packed source (so a
+  4bpp image without a palette draws as garbage in the original); 0x30 uses 0x4190f6/0x419e64 for
+  every transform; 0x40 and 0x50 pick per-transform blitters from the low nibble (the transform
+  ORed in by ops8 blit).
+- **drawImage transforms 4 and 5** [M, from the pointer set-up in ops8 blit]: with `(i, j)` the
+  destination offset and the source rect `[sx0,sx1) x [sy0,sy1)`, transform 4 reads
+  `src(sx1-1-j, sy0+i)` (90° counter-clockwise) and transform 5 reads `src(sx0+j, sy1-1-i)` (90°
+  clockwise). 1 flips vertically, 2 horizontally, 3 both.
+- exen-reloaded keeps the EXimg inside the image_imgT byte[] as the original does, with arena
+  references instead of pointers and 1 KiB of inline storage for decoder-created palettes, so
+  `getSizeOfEXimgStruct` returns 0x458 instead of 0x58 (the layout is in graphics.c).
+
 ### 2.2 exen.Gamelet (67–88)
 
 | idx | method (sig) | C addr | semantics | conf |
@@ -252,6 +287,14 @@ getCharWidth/getCharHeight are bytecode and are not in this range.
 | 88 | Gamelet.platformRequest(LString;)Z | 0x42563e | always false | H |
 
 Gamelet's other methods, including onKeyPress, onTimerTick, the constructors and so on, are bytecode.
+
+Gamelet bytecode notes [H]: the constructor sets `Component.width/height` from
+getScreenWidth/Height and creates the screen with `image = Image.createImage(w, h)` and
+`gBuff = new Graphics(image)`; `update()` is `screenUpdate(1, 100)`. `<clinit>` defines the key
+codes `KEY_NUM0..9 = '0'..'9'`, `KEY_STAR = '*'`, `KEY_POUND = '#'`, `KEY_PAD_UP = -1`,
+`KEY_PAD_LEFT = -2`, `KEY_PAD_RIGHT = -5`, `KEY_PAD_DOWN = -6`, `KEY_CLEAR = -7`, `KEY_VAL = -8`,
+and the game actions `UP 1, DOWN 6, LEFT 2, RIGHT 5, FIRE 8, GAME_A..D 9..12`. gensimu itself
+never sends the KEY_PAD codes (arrows are mapped to digits, §4.2).
 
 ### 2.3 Resource, AnimBitmap, PlayField, AnimFlash, Displayable, DialogBox, FX, List, RayCast
 

@@ -770,11 +770,14 @@ static void run(ExenVM *vm)
             int has_this = op != 0xf1;
             int nargs = U16AT(rec + 6) + has_this;
             uint32_t *args = f->sp - nargs;
+            /* Initialise the class while the arguments are still on the operand stack: a
+             * <clinit> run starts at the stack top and would overwrite them (and the GC would
+             * no longer see the references among them). */
+            if (!has_this && vm_init_class(vm, f->cls) < 0)
+                break;
             f->sp = args;
             if (has_this && !args[0])
                 THROW(H_NPE);
-            if (!has_this && vm_init_class(vm, f->cls) < 0)
-                break;
             vm_invoke(vm, f->cls, rec, args, has_this);
             break;
         }
@@ -787,6 +790,9 @@ static void run(ExenVM *vm)
             int nargs = U16AT(ref + 4) + has_this;
             int rcls = U16AT(U16AT(ref + 6));
             uint32_t *args = f->sp - nargs;
+            /* as above: <clinit> must not run over the popped arguments */
+            if (op == 0xf2 && rcls < vm->nclasses && vm_init_class(vm, rcls) < 0)
+                break;
             f->sp = args;
             int found = -1;
             uint32_t m;
