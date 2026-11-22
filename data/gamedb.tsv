@@ -1,0 +1,52 @@
+# ExEn games known to exen-reloaded: default handset screen per game.
+# crc32 = CRC-32 of the whole .exn file; main = NEXE main class (fallback key).
+# basis: fills-screen = largest size the game fills edge to edge; least-margin = the size
+# where it leaves the smallest uniform border (tools/harness/probe_sizes.py). Override with --size.
+# crc32	main	title	width	height	basis
+cb7cd9e3	OO7IceRacer.GameTopLevel	007Ice-Racer	101	80	least-margin
+79becaf3	AgeOfEmpires.Game	AgeOfEmpiresMobile	132	176	fills-screen
+89433f93	Arthur.GameTopLevel	Arthur&LesPirates	101	80	least-margin
+57abe8b5	Banjo_Kazooie	BanjoKazooie	101	80	fills-screen
+483affcf	Bombjack	BombJack	101	80	least-margin
+d85b361e	BombSquad.GameTopLevel	BombSquad	132	176	fills-screen
+00ab8bd5	Charmed.GameTopLevel	Charmed	101	80	fills-screen
+587ecfdf	CrashBandicoot.GameTopLevel	Crash Bandicoot	101	80	fills-screen
+5cfb0611	CrazyCobra2.GameTopLevel	CrazyCobra2	132	176	fills-screen
+c0d80254	EagleSquadron.GameTopLevel	EagleSquadron	128	160	least-margin
+eace44da	FPilotEvolved.GameTopLevel	FighterPilotEvolved	132	176	fills-screen
+e656823f	NightmareBuster.GameTopLevel	Flynn	101	80	fills-screen
+fe4ad506	FootballFans.GameTopLevel	FootballFans	101	80	least-margin
+d0f6266f	GhostHunter.GameTopLevel	GhostHunter	112	112	fills-screen
+33cb123e	PingPong.GameTopLevel	IFPingPong	132	176	fills-screen
+1d552acf	IFRacing.GameTopLevel	IFRacing	101	80	least-margin
+0949dbb7	IFRacing2.GameTopLevel	IFRacing2	132	176	fills-screen
+4cbc5689	IFSkiExtreme	IFSkiExtreme	112	112	fills-screen
+c7f63b12	IFSkiJumping	IFSkiJumping	112	112	fills-screen
+169d135e	IFSudoku	IFSudoku	132	176	fills-screen
+76a46f45	JungleRun.GameTopLevel	JungleRun	101	80	fills-screen
+2b6bb51a	MalibuRide2.F1	MalibuRide2	101	80	least-margin
+7d1b31ad	midtown.MidtownMadness	MidtownMadness3	132	176	fills-screen
+5c119d2d	MonkeyBusiness	MonkeyBusiness	132	176	fills-screen
+f08b19c3	MotoGP.GameTopLevel	MotoGp	132	176	fills-screen
+78364c5e	MutantAlert.GameTopLevel	MutantAlert	101	80	least-margin
+4b6b576f	Panko.Panko	Panko	120	143	fills-screen
+3ed893de	Pikubi	Pikubi	112	112	fills-screen
+a7787709	Pikubi2	Pikubi2	101	80	least-margin
+383fbb31	Reversi.GameTopLevel	Reversi	101	80	fills-screen
+1ad612c5	SexyBreaker.GameTopLevel	SexyBreakerBikini	128	128	least-margin
+d1ae9d13	SexyManga.GameTopLevel	SexyManga	128	128	least-margin
+0e476930	SexyPoker.GameTopLevel	SexyVideoPoker	101	80	fills-screen
+21fa7c13	ShadoFighter.GameTopLevel	ShadoFighter	101	80	least-margin
+1d03ba52	SouthPark.GameTopLevel	SouthPark	128	141	least-margin
+4144b2f2	SphereMadness.GameTopLevel	SphereMadness	112	112	fills-screen
+8c550c48	SphereMadness2.GameTopLevel	SphereMadness2	132	176	fills-screen
+92c145f7	Spyro.GameTopLevel	Spyro	132	176	fills-screen
+0ca73497	StarWars.GameTopLevel	StarWars3	101	80	least-margin
+942c1f1b	TheTerminator.GameTopLevel	TheTerminator	101	80	fills-screen
+c51befc6	tombraider.TombRaiderMIDlet	TombRaider	101	80	least-margin
+9046a97d	tombraider.TombRaiderMIDlet	TombRaider2	101	80	least-margin
+cb0a273b	tombraider.TombRaiderMIDlet	TombRaider3	101	80	least-margin
+61ae83b7	TourDeFrance.GameTopLevel	TourDeFrance	132	176	fills-screen
+fc8d6670	Worms.GameTopLevel	Worms	128	128	fills-screen
+02b9280f	XMasTale.GameTopLevel	XMasTales	101	80	fills-screen
+fdc1c015	ZooTycoon.GameTopLevel	ZooTycoon2	101	80	least-margin

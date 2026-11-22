@@ -170,7 +170,8 @@ static void usage(void)
             "usage: exen-reloaded [options] game.exn\n"
             "  --sim PATH      original simulator (gensimu.exe); searched beside the app by default\n"
             "  --scale N       window scale (default 4)\n"
-            "  --size WxH      screen size of the target handset (default 101x80)\n"
+            "  --size WxH      screen size of the target handset (default: from the game\n"
+            "                  database, else 132x176)\n"
             "  --fullscreen    start fullscreen (F11 toggles)\n"
             "  --mute          start with the sound off (M toggles)\n"
             "  --volume N      sound volume 0-100 (default 100)\n"
@@ -181,7 +182,7 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     const char *sim = NULL, *game = NULL;
-    int scale = 4, w = 101, h = 80, fullscreen = 0, mute = 0, volume = 100;
+    int scale = 4, w = 0, h = 0, fullscreen = 0, mute = 0, volume = 100;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--sim") && i + 1 < argc) sim = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
@@ -192,7 +193,7 @@ int main(int argc, char **argv)
         else if (argv[i][0] == '-') { usage(); return 2; }
         else game = argv[i];
     }
-    if (!game || w <= 0 || h <= 0 || scale <= 0 || volume < 0 || volume > 100) {
+    if (!game || w < 0 || h < 0 || scale <= 0 || volume < 0 || volume > 100) {
         usage();
         return 2;
     }
@@ -207,6 +208,12 @@ int main(int argc, char **argv)
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "exen-reloaded",
                                  !simb ? "Cannot find gensimu.exe (use --sim)." : "Cannot read the game file.", NULL);
         return 1;
+    }
+    ExenGameInfo gi;
+    exen_game_info(gameb, gl, &gi);
+    if (w <= 0 || h <= 0) {
+        w = gi.width;
+        h = gi.height;
     }
 
     App a = {0};

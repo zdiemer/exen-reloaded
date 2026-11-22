@@ -190,7 +190,8 @@ static void usage(void)
             "usage: exen-run [options] game.exn\n"
             "  --frames N        timer ticks to run (default 300)\n"
             "  --sim FILE        gensimu.exe to take the framework from\n"
-            "  --size WxH        screen size (default 101x80)\n"
+            "  --size WxH        screen size (default: the game's handset from the game\n"
+            "                    database, else 132x176)\n"
             "  --eeprom FILE     initial 2048-byte EEPROM image\n"
             "  --dump DIR        write presented frames as DIR/frame_NNNNN_tTTTTT.png\n"
             "                    (N = frame number, T = tick it was presented in)\n"
@@ -211,7 +212,7 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    const char *sim = "vendor/gensimu/gensimu.exe", *game = NULL, *eeprom = NULL, *wav_path = NULL;
+    const char *sim = NULL, *game = NULL, *eeprom = NULL, *wav_path = NULL;
     static Wav wav;
     wav.rate = 44100;
     int frames = 300, sw = 0, sh = 0;
@@ -259,12 +260,40 @@ int main(int argc, char **argv)
     }
     if (run.dump_every < 1)
         run.dump_every = 1;
-    size_t sl, gl;
-    uint8_t *simb = slurp(sim, &sl), *gameb = slurp(game, &gl);
+    size_t sl = 0, gl = 0;
+    uint8_t *simb = NULL, *gameb = slurp(game, &gl);
+    if (sim) {
+        simb = slurp(sim, &sl);
+    } else {
+        /* beside the executable, then the source-tree layout, then the working directory */
+        static const char *rel[] = {"gensimu.exe", "../vendor/gensimu/gensimu.exe",
+                                    "vendor/gensimu/gensimu.exe"};
+        char dir[1024], path[1200];
+        snprintf(dir, sizeof dir, "%s", argv[0]);
+        char *cut = strrchr(dir, '/'), *cut2 = strrchr(dir, '\\');
+        if (cut2 > cut)
+            cut = cut2;
+        if (cut)
+            cut[1] = 0;
+        else
+            dir[0] = 0;
+        for (int k = 0; k < 6 && !simb; k++) {
+            snprintf(path, sizeof path, "%s%s", k < 3 ? dir : "", rel[k % 3]);
+            simb = slurp(path, &sl);
+        }
+    }
     if (!simb || !gameb) {
-        fprintf(stderr, "cannot read %s\n", simb ? game : sim);
+        fprintf(stderr, "cannot read %s\n", !gameb ? game : sim ? sim : "gensimu.exe (use --sim)");
         return 2;
     }
+    ExenGameInfo gi;
+    exen_game_info(gameb, gl, &gi);
+    if (sw <= 0 || sh <= 0) {
+        sw = gi.width;
+        sh = gi.height;
+    }
+    printf("title: %s (%s)\nscreen: %dx%d\n", gi.title,
+           gi.match == EXEN_GAME_EXACT ? "known" : gi.match ? "known main class" : "unknown game", sw, sh);
     ExenConfig cfg = {0};
     cfg.screen_width = sw;
     cfg.screen_height = sh;

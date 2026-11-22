@@ -17,6 +17,7 @@ add_library(exen_core STATIC
   src/core/extnatives.c
   src/core/fx.c
   src/core/graphics.c
+  src/core/gamedb.c
   src/core/hash.c
   src/core/heap.c
   src/core/interp.c
