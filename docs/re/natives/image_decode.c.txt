@@ -1,0 +1,216 @@
+/* exen.Image bitmap decoding (gensimu.exe): "ExEn PNG" + raw 1bpp.  Structs: eximg_common.c.txt
+ *
+ * KEY FINDING: the PNG resources in .exn files are NOT standard PNG. Verified on
+ * vendor/gensimu/flash/*.exn (31 images):
+ *   - 8-byte PNG signature, then chunks  [u32 BE length][4cc type][data]  with NO CRC and no IEND
+ *     (the decoder stops at the first IDAT).
+ *   - IHDR compression byte = 1 (not 0/zlib); bit depth 8, colour type 3 in the whole corpus.
+ *   - IDAT payload is In-Fusio compressed, no PNG row-filter bytes. Its first byte's high nibble
+ *     selects one of five codecs (corpus: 28x type 5, 3x type 3). Bytes 9..11 of IDAT = 24-bit LE
+ *     unpacked size (= pitch*h).
+ *   - Truecolour (type 2) is refused: the text "True color PNG not supported" is drawn into the
+ *     image with the built-in font (0x41e07f) and decode returns success.
+ */
+
+/* Source descriptor used by all readers ("ResExed"):
+ *   struct Src { u32 filePos; u8 *mem; u32 len; };
+ *   mem != NULL => read from memory (byte[] variant); else read from the open .exn file
+ *   ctx->fileObj (+0x14 -> +4) via seek 0x403680 / read 0x403648, through a 30-byte window cache
+ *   (0x41d620, buffer 0x51f8e0, window start 0x45a328).
+ *   readU8 0x41d6a5, readU16BE 0x41d6fc, readU32BE 0x41d73a, tell 0x41d940, seek 0x41d91f,
+ *   skip 0x41d95b.
+ *
+ * Natives:
+ *  26 TransformBitmapFromResExed(Resource r, boolean keepPal) @0x4265ca
+ *       Src = { r.f0(+0x18) + r.f2(+0x20), NULL, r.f1(+0x1c) }  -> decodeBitmap(e, &src, keepPal)
+ *  28 TransformBitmapFromResExed(byte[] b, boolean keepPal)   @0x4266a1
+ *       Src = { 0, b+0x14, 0 } -> decodeBitmap
+ *  27 GetBitmapDepthFromResExed(Resource r, boolean keepPal) static @0x42664c -> bitmapDepth
+ *  29 GetBitmapDepthFromResExed(byte[] b, boolean keepPal)   static @0x426732 -> bitmapDepth
+ *  (Resource field meaning is fork B's; f0+f2 looks like base offset + cursor, f1 = length.)
+ */
+
+int bitmapDepth(Src *s, bool keepPal) {            /* 0x418cdf -> 0x41d987 */
+    if (!isPng(s)) return 4;                       /* non-PNG (raw 1bpp) => reported as 4 (!) */
+    skip(s, 8);
+    for (;;) {                                     /* scan for IHDR */
+        u32 len = readU32BE(s), type = readU32BE(s), pos = tell(s);
+        if (type == 'IHDR') {
+            readU32BE(s); readU32BE(s);            /* w,h */
+            u8 bd = readU8(s), ct = readU8(s); readU8(s); readU8(s); readU8(s);
+            if (ct == 3 && bd == 4 && keepPal) return 4;
+            return 8;
+        }
+        seek(s, pos + len);
+    }
+}
+bool isPng(Src*s) /* 0x41d836 */ { /* peek 8 bytes == 89 50 4E 47 0D 0A 1A 0A, position unchanged */ }
+
+int decodeBitmap(EXimg *e, Src *s, bool keepPal) { /* 0x418d0a */
+    if (isPng(s)) return decodePngDriver(e, s, keepPal);           /* 0x41e504 -> 0x41e45f */
+    /* raw 1bpp ("TransformBlackAndWhiteBitmap") */
+    if (s->mem) return e->ops->import1bpp(e, s->mem, keepPal);     /* slot 3 */
+    u32 n = ((e->w + 7) >> 3) * e->h;
+    u8 *tmp = e->data + e->size - n;               /* staged at the END of the pixel buffer */
+    seek+read n bytes from file into tmp; return e->ops->import1bpp(e, tmp, keepPal);
+}
+/* ops8 import1bpp 0x42bdb3: pitch=w, size=w*h; rows are byte-aligned, MSB first.
+ *   keepPal: pixel = bit (0/1); pal = {0x00000000, 0xFFFFFFFF}, palCount 2, mode 0x40.
+ *   else   : pixel = bit ? 0xFF : 0x00 (RGB332 white/black), pal = NULL, mode 0x10.
+ *   bit 1 = white, bit 0 = black.  (ops4 variant 0x42b515 analogous, not decoded.) */
+
+int decodePngDriver(EXimg *e, Src *s, bool keepPal) {  /* 0x41e45f */
+    u32 cap = (e->depth == 4) ? ((e->w + 1) / 2) * e->h : e->w * e->h;
+    if (!s->mem && s->len < cap) {                 /* whole resource fits: load it into the tail of
+                                                      the pixel buffer and decode in place */
+        u8 *tail = e->data + cap - s->len;
+        readBytes(s, s->len, tail);                /* 0x41d7b2 */
+        s->mem = tail; s->filePos = 0;
+    }
+    return decodePng(e, s, keepPal);               /* 0x41dacd */
+}
+
+int decodePng(EXimg *e, Src *s, bool keepPal) {    /* 0x41dacd */
+    u8 *lut332 = NULL;  int mode = 0x10;  u32 w,h; u8 bd, ct;
+    if (!isPng(s)) return 0;
+    skip(s, 8);
+    for (;;) {
+        u32 len = readU32BE(s), type = readU32BE(s), pos = tell(s);
+        switch (type) {
+        case 'IHDR':
+            w = readU32BE(s); h = readU32BE(s); bd = readU8(s); ct = readU8(s);
+            readU8(s); readU8(s); readU8(s);       /* compression, filter, interlace ignored */
+            e->depth = keepPal ? bd : 8;           /* NB keepPal with bd 1/2 => depth 1/2 => ops NULL */
+            e->ops   = opsForDepth(e->depth);
+            e->pitch = (bd == 4 && keepPal) ? (w + 1) >> 1 : w;
+            e->size  = e->pitch * h;               /* e->w/e->h are NOT written here (set by Init) */
+            installBlitters(e); e->setBlitMode(e, 0x10);
+            break;
+        case 'PLTE': {
+            u32 n = len / 3;
+            if (keepPal) {
+                e->pal = malloc(n * 4); if (!e->pal) { e->palCount = 0; return -2; }
+                e->palCount = n;
+                for (i < n) e->pal[i] = 0xFF000000 | r<<16 | g<<8 | b;
+                mode = 0x40;
+            } else {
+                lut332 = malloc(n); if (!lut332) return -2;
+                for (i < n) lut332[i] = (r & 0xE0) | ((g & 0xE0) >> 3) | ((b >> 6) & 3);
+                mode = 0x10;
+            }
+            e->setBlitMode(e, mode);
+            break; }
+        case 'tRNS':
+            mode = 0x10;
+            if (ct == 3) {
+                mode = 0x20;
+                if (keepPal) {
+                    int zeros = 0;
+                    for (u32 i = 0; i < len; i++) {
+                        u32 a = readU8(s);
+                        if (a == 0xFF) continue;
+                        if (a == 0) { e->transpIdx = i; zeros++; }
+                        e->pal[i] = (e->pal[i] & 0x00FFFFFF) | a;   /* BUG: alpha OR'd into the BLUE
+                                                                        byte; alpha byte becomes 0 */
+                    }
+                    e->alphaMode = (zeros > 1);
+                    mode = e->alphaMode ? 0x30 : 0x50;
+                } else {
+                    for (u32 i = 0; i < len; i++)
+                        if (readU8(s) == 0) e->transpIdx = lut332[i];   /* RGB332 key; last wins */
+                }
+            } else if (ct == 2) {                  /* RGB key, 16-bit samples */
+                u16 r = readU16BE(s), g = readU16BE(s), b = readU16BE(s);
+                e->transpIdx = (r & 0xE0) | ((g & 0xE0) >> 3) | ((b >> 6) & 3);
+            }
+            e->setBlitMode(e, mode);
+            break;
+            /* Consequences of the bug: with keepPal, any palette entry with tRNS alpha < 255 gets
+             * alpha byte 0 (fully transparent in mode 0x30) and its blue channel ORed with alpha.
+             * One fully transparent entry (typical sprite) => mode 0x50 colour-key, palette intact
+             * except that entry. */
+        case 'IDAT': {
+            if (ct == 2) { font->drawText(font, e, 0, 0, "True color PNG not supported", 1, 23, 0); goto done; }
+            if (ct != 3) goto done;
+            u32 outSize = (bd == 4 ? ((w + 1) >> 1) : w) * h;
+            u8 *out = e->data, *in;  u8 *tmp = NULL;  Codec *c;
+            if (!s->mem) { tmp = vmAlloc(len); if (!tmp) {free(lut332); return -2;}  /* 0x407a57 */
+                           readBytes(s, len, tmp); c = codecCreate(tmp, len); }
+            else            c = codecCreate(s->mem /* current pos */, len);
+            if (!c) { free(lut332); return -2; }
+            c->decode(c, out, outSize);            /* vtable[0] */
+            if (tmp) vmFree(tmp);                  /* 0x407a71 */
+            if (bd == 8 && !keepPal)               /* fold indices to RGB332 in place */
+                for (y<e->h) for (x<e->w) *out = lut332[*in++]... (in==out, forward, pitch==w)
+            if (bd == 4 && !keepPal)               /* expand nibbles to bytes in place, backwards */
+                for each row from the end: (odd w: last nibble = byte>>4), then pairs:
+                    dst[-1] = lut332[b & 0xF]; dst[-2] = lut332[b >> 4];   /* high nibble = left px */
+            /* bd 1/2 and bd 8/4 with keepPal: decoded bytes left as is (indices) */
+        done:
+            if (c) { c->destroy(c); free(c); }      /* vtable[1] */
+            if (lut332 && !keepPal) free(lut332);
+            return 1; }
+        case 'IEND':
+            if (lut332 && !keepPal) free(lut332);
+            return 1;
+        }
+        seek(s, pos + len);                        /* no CRC skipped */
+    }
+}
+
+/* codecCreate 0x432e50(data,len): c = malloc(0x14); c->data(+0xc)=data; c->len(+8)=len;
+ *   switch (data[0] >> 4): 1 -> 0x431750, 2 -> 0x42f560, 3 -> 0x42d500, 4 -> 0x432180,
+ *                          5 -> 0x432a00 ; else free, return NULL.
+ *   vtable: [0]=decode(c,out,outSize), [1]=destroy.
+ *   decode fns: t1 0x4318f6, t2 0x42f724, t3 0x42d960 (2384 insns), t4 0x43228b, t5 0x432a76.
+ *   Types 1-4 use a big-endian bit reader 0x412ea0(buf, &bitpos, nbits) and a header parser
+ *   0x432e03 -> 0x432d20 (returns ((w+7)&~7)*h-like size). NOT DECOMPILED YET (open item).
+ */
+
+/* codec type 5 = LZ77, decode 0x432a76  (header parse 0x432a00: c->outLen = data[9] | data[10]<<8 | data[11]<<16) */
+int codec5_decode(Codec *c, u8 *out, u32 unused) {
+    const u8 *in = c->data + 9;
+    u8 *end = out + (in[0] | in[1] << 8 | in[2] << 16);
+    in += 4;                                       /* data+13 */
+    u8 stash[0x400];
+    for (;;) {
+        s32 ctl = in[0]<<24 | in[1]<<16 | in[2]<<8 | in[3];  in += 4;
+        int distBits = 14 - (ctl & 3);
+        int distMask = 0x3FFF >> (ctl & 3);
+        for (int k = 0; k < 30; k++) {             /* 30 flags per word, MSB first */
+            if (ctl < 0) {                         /* match */
+                u32 wv = in[0] << 8 | in[1];  in += 2;
+                u32 n = (wv >> distBits) + 3;
+                u32 dist = (wv & distMask) + 1;
+                if (out + n > end) n = end - out;
+                while (n--) {
+                    if (out == in) { memcpy(stash, in, 0x400); in = stash; }   /* in-place guard */
+                    *out = out[-dist]; out++;
+                }
+            } else {                               /* literal */
+                if (out == in) { memcpy(stash, in, 0x400); in = stash; }
+                *out++ = *in++;
+            }
+            if (out >= end) return 1;
+            ctl <<= 1;
+        }
+    }
+}
+/* The "out == in" stash exists because the driver decodes in place (compressed data staged in the
+ * tail of the destination buffer). A port that decodes into a separate buffer can drop it.
+ * conf: high (structure), verified size field against corpus (88x65 -> 0x001658). */
+
+/* Image palette natives */
+/* 15 updateNativePaletteFromJavaPalette() private @0x426235:
+ *    t = Image.palette.colorTabRGBA; if (t) { e->pal = t+0x14 (aliases the Java int[]); e->palCount =
+ *    t.length; e->palVersion = &Palette.paletteVersion; setBlitMode(0x40); }
+ *    else { pal=NULL,count=0,version=NULL; if (e->blitMode != 0x20) setBlitMode(0x10); }
+ * 16 getNativePaletteSize() @0x426302: returns e->palCount (0 if no imgT).
+ * 17 updateJavaPaletteFromNativePalette() @0x426357: copy e->pal[0..len) into
+ *    Image.palette.colorTabRGBA (len = Java array length, no bound check vs palCount),
+ *    free(e->pal) (0x4040a4), then alias e->pal to the Java array, set palCount, palVersion.
+ * 25 transformNativePaletteToRawRGB() @0x426589 -> 0x418df7: if palCount: for every data byte
+ *    b = (u8)e->pal[b] (LOW byte of the 0xAARRGGBB entry = blue!) ; transpIdx = (u8)pal[transpIdx].
+ *    Does not clear pal or change blitMode. Looks wrong unless the palette had been pre-converted;
+ *    reproduce literally.                                                          conf medium
+ */

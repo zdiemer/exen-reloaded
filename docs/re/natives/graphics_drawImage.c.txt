@@ -1,0 +1,84 @@
+/* exen.Graphics.drawImage native + blit pipeline (gensimu.exe). Structs: eximg_common.c.txt */
+
+/* native 1 @0x425699: drawImage(Image img, int a2..a11) -- package-private, 11 args.
+ * The public drawImage overloads are bytecode wrappers.
+ *   args[1]=img, args[2]=dx, args[3]=dy, args[4]=dw, args[5]=dh, args[6]=UNUSED,
+ *   args[7]=sx, args[8]=sy, args[9]=sw, args[10]=sh, args[11]=transform (0..5)
+ * -> drawImageCore(dst, dx,dy,dw,dh, src, sx,sy,sw,sh, (u16)curPaintMode, transform)   0x418008
+ */
+int drawImageCore(EXimg *d, int dx,int dy,int dw,int dh, EXimg *s, int sx,int sy,int sw,int sh,
+                  int mode, int tr) {
+    if (!d || !d->data || !s || !s->data) return -2;
+    if (d->depth < s->depth)            return -5;   /* 8bpp src onto 4bpp dst rejected */
+    if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0) return -5;
+    if (dx >= d->clipX + d->clipW || dy >= d->clipY + d->clipH) return -5;
+    if (tr == 4 || tr == 5) { if (dx+dh < d->clipX || dy+dw < d->clipY) return -5; }
+    else                    { if (dx+dw < d->clipX || dy+dh < d->clipY) return -5; }
+    if (sx > s->w || sy > s->h) return -5;
+    if (sx + sw < 0 || sy + sh < 0) return -5;
+    s->ops->setPaintMode(mode);                         /* no-op */
+    if (sw == dw && sh == dh)
+        return d->ops->blit(d, dx, dy, dx+dw, dy+dh, s, sx, sy, sx+sw, sy+sh, tr);  /* slot 13 */
+    else
+        return d->ops->blitScaled(d, dx, dy, dw, dh, s, sx, sy, sw, sh);           /* slot 14, tr ignored */
+}
+
+/* ops8 blit 0x42c363 (d, x0,y0,x1,y1, s, sx0,sy0,sx1,sy1, tr)   (x1/y1 exclusive)
+ *  1. if tr is 4/5: swap the destination extents so that (x1-x0)=src h, (y1-y0)=src w.
+ *  2. clip dest box against d clip; adjust the matching source edges per transform
+ *     (jump table 0x42ca2b): for tr 0 the left/top overshoot advances sx0/sy0, right/bottom
+ *     overshoot shrinks sx1/sy1; for flips/rotations the corresponding opposite source edge is
+ *     moved (tr1: vertical flip, tr2: horizontal flip, tr3: both, tr4/5: rotations).
+ *  3. clamp source to [0, s->w] x [0, s->h] (adjusting dest extent equally).
+ *  4. if dest w or h <= 0 -> -5.
+ *  5. lut = paletteLUT(s)  (result unused here; primes the global LUT for the row blitters)
+ *  6. if s->depth != 8: s->setBlitMode(s, s->blitMode | tr)   (4bpp picks a rotation-aware blitter)
+ *  7. dispatch on tr (table 0x42ca43) and call s->blit(s, dstPtr, dstSkip, srcPtr, xStep, srcSkip,
+ *                                                     w, h, sxStart):
+ *     tr  srcPtr start                     xStep   srcSkip (added after each row)
+ *     0   data + sy*pitch + sx             +1      pitch - w
+ *     1   data + (sy1-1)*pitch + sx        +1      -pitch - w          (flip vertical)
+ *     2   data + sy*pitch + sx1-1          -1      pitch + w           (flip horizontal)
+ *     3   data + (sy1-1)*pitch + sx1-1     -1      -pitch + w          (rotate 180)
+ *     4   0x42c998: start data + sy*pitch + sx1-1 ; xStep = +pitch ; srcSkip = -pitch*w - 1
+ *     5   0x42c916: start data + (sy1-1)*pitch + sx ; xStep = -pitch ; srcSkip = pitch*w + 1
+ *         (for 4bpp sources sx/sx1 are nudged by +-1 for nibble alignment)
+ *     dstPtr = d->data + y0*d->pitch + x0 ; dstSkip = d->pitch - w
+ *  conf: high for 0-3, medium for exact 4/5 orientation (which one is 90 vs 270).
+ */
+
+/* 8bpp-source row blitters, chosen by s->blitMode (0x41a2a0):  (s,dst,dstSkip,src,xStep,srcSkip,w,h)
+ *   0x10 opaque raw      0x41a3d2: copy byte (memcpy per row if xStep==1)
+ *   0x20 key raw         0x41a48f: if (*src != s->transpIdx) *dst = *src
+ *   0x30 palette alpha   0x41a511: a = s->pal[*src] >> 24; c = lut[*src];
+ *                                  a==255: *dst=c ; a==0: skip ;
+ *                                  else per RGB332 field m in {0xE0,0x1C,0x03}:
+ *                                    f = ((((c&m) - (*dst&m)) * a) >> 8  [u32 logical shift]) + (*dst&m), & m
+ *   0x40 opaque palette  0x41a70b: *dst = lut[*src]
+ *   0x50 key palette     0x41a66c: if (*src != s->transpIdx) *dst = lut[*src]   (key compared on INDEX)
+ *   (any other mode -> 0x10)
+ * Scaled counterparts (blitScaled -> s->blitScaled): 0x41a794, 0x41a85a, 0x41a94d, 0x41ab18, 0x41abfb.
+ *   ops8 0x42ca5b computes xStep=(sw<<16)/dw, yStep=(sh<<16)/dh (16.16), clips, and calls
+ *   e.g. 0x41a794: for each row: srow = data + (v>>16)*pitch + (u0>>16); u = u0&0xFFFF;
+ *                    for each px: *dst++ = srow[u>>16]; u += xStep;   v += yStep.
+ *   Nearest neighbour, truncating, no transform.
+ * 4bpp-source blitters (0x418f00): modes 0x10/0x20 fall back to setBlitMode8 (8bpp blitters!),
+ *   0x30 -> 0x4190f6/0x419e64, 0x40/0x50 -> per-transform variants
+ *   0x4197a8/0x41993e/0x4195ed/0x419c9b/0x419aaa with scaled 0x41a054/0x41a16e.
+ *   4bpp pixels: high nibble = even x, low nibble = odd x.            conf medium
+ *
+ * blitMode transitions (who sets e->blitMode):
+ *   init / PNG IHDR                         -> 0x10
+ *   PNG PLTE kept as palette                -> 0x40 ; PLTE folded to RGB332 -> 0x10
+ *   PNG tRNS (paletted, kept)               -> exactly one alpha==0 entry... see png doc: 0x50 or 0x30
+ *   PNG tRNS (folded)                       -> 0x20
+ *   setTransparentColor(c)   0x418ec3       transpIdx = c&0xFF; mode = pal ? 0x50 : 0x20
+ *   removeTransparentColor() 0x418e8a       mode = pal ? 0x40 : 0x10
+ *   setPaletteAlpha(b)       0x426419       alphaMode=b; b ? 0x30 : (pal ? 0x40 : 0x10)
+ *                                           (turning alpha off forgets a transparent key)
+ *   updateNativePaletteFromJavaPalette()    pal set -> 0x40 (forgets key/alpha!) ;
+ *                                           pal null -> 0x10 unless current mode == 0x20
+ * Performance: per drawImage two indirect calls + one per row; LUT rebuild (<=256 entries) whenever
+ * palette version differs from the last one used (alternating sprites with different palettes
+ * rebuild every call).
+ */

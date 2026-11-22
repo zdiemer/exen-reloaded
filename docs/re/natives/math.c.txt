@@ -1,0 +1,64 @@
+/* exen.Math natives (gensimu.exe). Globals: MS = *(u32**)([0x45ff3c]+8):
+   MS[0]=rand state s0, MS[1]=rand aux s1, MS[2]=sinus period. Init 0x41c8f0: 0xc800,0xc800,1
+   (called from 0x43312e). T = (u16*)0x4567f8, 513 entries (copy verbatim from file off 0x567f8).
+   No Win32 dependencies. Native wrappers 0x426990..0x426add are static: read args[0..1],
+   write args[0], return 1 (setters return 0). */
+static int cos_(int a) {                       /* 0x41c972 */
+    a &= 0x7ff;
+    if (a < 0x200)  return  T[a];
+    if (a < 0x400)  return -(int)T[0x400 - a];
+    if (a < 0x600)  return -(int)T[a - 0x400];
+    return T[0x800 - a];
+}
+static int sin_(int a) { return cos_(a - 0x200); }          /* 0x41c956 */
+static int acos_idx(int v) {                   /* 0x41c9e9 */
+    int lo = 0, hi = 0x200;
+    while (hi - lo > 1) { int m = (lo + hi) >> 1; if ((int)T[m] > v) lo = m; else hi = m; }
+    return lo;
+}
+static int isqrt_(int x) {                     /* 0x41ce03 */
+    if (x < 2) return x;                       /* signed compare: negatives returned as-is */
+    unsigned n = x, t = n; int k = 0;
+    while ((t >>= 2) != 0) k++;
+    unsigned r = 1u << k, b = r, sq = r << k;
+    while (k-- != 0) {                         /* test old k, use decremented k */
+        b >>= 1;
+        unsigned c = ((r + r + b) << k) + sq;
+        if (c <= n) { r += b; sq = c; }
+    }
+    return r;
+}
+static int getAngle(int x, int y) {            /* 0x41ca3c */
+    int r = isqrt_(x*x + y*y), a, neg = 0;     /* 32-bit wrap */
+    if (r == 0) return 0;
+    if (y < 0) { neg = 1; y = -y; }
+    if (x > 0) {
+        if (x > y) { a = acos_idx((y << 16) / r) - 0x200; a = (0x800 - a) & 0x7ff; }
+        else         a = acos_idx((x << 16) / r);
+    } else {
+        if (-x < y)  a = 0x400 - acos_idx(((-x) << 16) / r);
+        else         a = acos_idx((y << 16) / r) + 0x200;
+    }
+    if (neg) a = 0x800 - a;
+    return a;                                  /* atan2(y,x), 2048 units per turn */
+}
+int getSinOfPeriod(int x) { return sin_((x << 11) / MS[2]); }   /* 0x41cb91 */
+int getCosOfPeriod(int x) { return cos_((x << 11) / MS[2]); }   /* 0x41cbb2 */
+int getCosPeriodPrecise(int x) {               /* 0x41cbd3; Sin variant 0x41cc88 uses sin_ */
+    int v = (x << 19) / MS[2];
+    int i = v / 256;                           /* compiled as (v + (v<0?255:0)) >> 8 */
+    int f = v & 0xff;                          /* low byte of raw v (two's complement) */
+    return (cos_(i) * (255 - f) + cos_(i + 1) * f) / 255;
+}
+void setSinusPeriod(int p) { if (p > 0) MS[2] = p; }           /* 0x41cb68 */
+int  getSinusPeriod(void)  { return MS[2]; }                     /* 0x41cb81 */
+void setRandSeed(int s) { MS[0] = s; MS[1] = s; }              /* 0x41cd3d */
+int random_(void) {                            /* 0x41cd5d */
+    int v = MS[0]; int n = MS[1] & 31;
+    for (int i = 0; i < n; i++) v = (v >> 1) | ((v & 1) << 31);  /* arithmetic >> (sign kept) */
+    MS[1] = MS[0] ^ 0x05960395;
+    MS[0] = v + MS[1] + 0x7921;
+    return MS[0];
+}
+int abs_(int x) { return x < 0 ? -x : x; }     /* 0x426a84 */
+/* sqrt native 0x426add maps a -5 result to -1 (unreachable). */

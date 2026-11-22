@@ -1,0 +1,98 @@
+/* exen.Graphics.drawChars and the built-in font (gensimu.exe). Structs: eximg_common.c.txt */
+
+/* Font object created at startup by 0x413a40 (called from 0x403400 with the constants at
+ * 0x4552f8..0x45530c) and stored in ctx->font (ctx = *(void**)0x45ff3c, +0x0c; also opsByDepth[3]).
+ *   struct Font {                      // 0x40 bytes
+ *     int (*charWidth)(Font*);         // +0x00 0x413891 -> +0x34
+ *     int (*charHeight)(Font*);        // +0x04 0x41389c -> +0x38
+ *     int (*drawChar)(...);            // +0x08 0x413afd
+ *     int (*drawText)(...);            // +0x0c 0x413b4f
+ *     +0x10/+0x14/+0x18/+0x1c/+0x20: 0x4138bb (charsThatFit = n/(w+1)), 0x4138cf (n/(h+1)),
+ *        0x4138e3 (min(fit,len)), 0x41391e (centre offset ((W - n*(w+1))/2)), 0x41393c (right align)
+ *     void (*destroy)(Font*);          // +0x24 0x413df2 (no-op)
+ *     const u8 *bits;                  // +0x28 = 0x454dd0 (in .rdata)
+ *     int bitmapWidth;                 // +0x2c = 0x500 (1280 px => row stride 160 bytes)
+ *     int _30;                         // +0x30 = 8 (unused by the draw path)
+ *     int glyphW;                      // +0x34 = 5
+ *     int glyphH;                      // +0x38 = 9 (only glyphH-1 = 8 rows are drawn)
+ *     int nGlyphs;                     // +0x3c = 256
+ *   };
+ * Glyph c occupies bits [c*5, c*5+5) of each of the 8 rows (row r at bits + r*160), MSB first.
+ * A pixel is INKED WHERE THE BIT IS 0. Advance = glyphW+1 = 6 px. Font is fixed; it is not
+ * loaded from the game, the language files, or the OS. Dump: render bits at 0x454dd0, 160x8 bytes.
+ * (FntBuild at 0x436fdc is unrelated: at startup it rasterises a 99-char charset
+ *  "A-Z a-z 0-9 *?!,:.'()-&éèàùïü\"{}|^@+=$£\\[]_ç/<" with GDI TextOutA + GetPixel into tables
+ *  at 0x4a2068/0x4a2080 for the simulator's own UI -- Win32, replace, not part of the VM.)
+ */
+
+/* native 5 @0x425a50: drawChars(char[] data, int offset, int length, int x, int y, int args6) */
+u16 Graphics_drawChars(u32 *a, Graphics *g) {
+    Obj *arr = (Obj*)a[1];  int off = a[2], len = a[3];
+    u16 n = arr->length;                                  /* +0x12 */
+    if (n < off || n < len || n < off + len || (off | len) < 0) { throw(0); return 0; }
+    EXimg *e = getImage(g->pixIma);  if (!e || !arr) { throw(0); return 0; }
+    syncClip(g, e);
+    font->drawText(font, e, a[4] /*x*/, a[5] /*y*/, arr->data + off /*bytes*/, 1, len,
+                   g->curColorIDX);                       /* a[6] (anchor?) unused natively */
+    return 0;
+}
+/* drawString/drawSubString are bytecode (convert String -> char[] then call drawChars). */
+
+int drawText(Font *f, EXimg *e, int x, int y, const u8 *s, int _one, int len, u8 color) { /* 0x413b4f */
+    int adv = f->glyphW + 1;
+    if (!s || !e) return -2;
+    if (y <= e->clipY - f->glyphH || y > e->clipY + e->clipH - 1 || e->clipW == 0 || e->clipH == 0)
+        return 1;
+    int L = e->clipX, R = e->clipX + e->clipW;
+    if (x + len*adv <= L || x > R || R <= 0) return 1;
+    int x0 = x;
+    if (x < L) {                                          /* skip whole characters left of clip */
+        int skip = abs(L - abs(x)) / adv;                 /* exact original formula (0x413c6d) */
+        if (skip > 0) { x += skip*adv; x0 = x; }
+        s += skip; len -= skip;
+    }
+    if (x + len*adv > R) len -= (x + len*adv - R) / adv;  /* drop characters fully right of clip */
+    for (x = x0; len > 0 && *(s8*)s != -1; s++, len--, x += adv)   /* 0xFF terminates */
+        if ((s8)*s < f->nGlyphs)                          /* signed compare: always true */
+            drawGlyph(f, e, x, y, (*s) * f->glyphW, color);
+    return 1;
+}
+/* Left skip uses |L - |x||: correct for x>=0 ((L-x)/adv) and for clipX==0 with x<0 (|x|/adv);
+ * wrong for x<0 with clipX>0 (skips too few, the rest is clipped per pixel so the visible result is
+ * identical, since x and s advance together; only wasted work). Partial glyphs at the
+ * edges are clipped per pixel by drawGlyph. conf high. */
+
+int drawGlyph(Font *f, EXimg *e, int x, int y, int bitX, u8 color) {   /* 0x413df7 */
+    int stride = f->bitmapWidth >> 3;                     /* 160 */
+    int r0 = 0, r1 = f->glyphH - 1;                       /* rows [0,8) */
+    if (y < e->clipY) {
+        if (y < e->clipY - (f->glyphH - 1)) return 1;
+        r0 = e->clipY - y; y = e->clipY;
+    } else if (y > e->clipY + e->clipH - f->glyphH) {
+        if (y > e->clipY + e->clipH) return 1;
+        r1 = e->clipY + e->clipH - y;
+    }
+    int c0 = bitX, c1;
+    if (x < e->clipX) {
+        if (x < e->clipX - f->glyphW) return 1;
+        int cut = e->clipX - x, vis = f->glyphW - cut;
+        c0 = bitX + cut; x = e->clipX;
+        c1 = c0 + (vis < e->clipW ? vis : e->clipW);
+    } else {
+        c1 = bitX + f->glyphW;
+        if (x > e->clipX + e->clipW - f->glyphW) {
+            if (x > e->clipX + e->clipW) return 1;
+            c1 = bitX + (e->clipX + e->clipW) - x;
+        }
+    }
+    if (r0 >= r1) return 1;
+    u8 *row = e->data + x + y * e->pitch;                 /* 8bpp byte-per-pixel ASSUMED */
+    const u8 *src = f->bits + stride * r0;
+    for (int r = r0; r < r1; r++, row += e->pitch, src += stride) {
+        u8 *p = row;
+        for (int b = c0; b < c1; b++, p++)
+            if (!(src[b >> 3] & (1 << (7 - (b & 7))))) *p = color;
+    }
+    return 1;
+}
+/* Drawing text on a 4bpp image writes bytes as if 8bpp (corrupts it). Paint mode ignored. */

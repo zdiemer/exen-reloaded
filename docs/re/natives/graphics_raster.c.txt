@@ -1,0 +1,107 @@
+/* exen.Graphics line / rect / triangle rasterisers (gensimu.exe).
+ * Types/structs: see eximg_common.c.txt. All coordinates are absolute image coordinates
+ * (no translation). Colour = Graphics.curColorIDX & 0xFF. Paint mode is passed but ignored.
+ */
+
+/* ---------- drawLine(x1,y1,x2,y2)  native 2 @0x4257a1 -> lineCore 0x4179d2 ---------- */
+/* outcode 0x417954: 1 = x<clipX, 2 = x>=clipX+clipW, 8 = y<clipY, 4 = y>=clipY+clipH */
+int lineCore(EXimg *e, int x0, int y0, int x1, int y1, u8 color, int mode) {
+    if (!e || !e->data) return -2;
+    if (x0 == x1 && y0 == y1) return putPixelClipped(e, x0, y0, color);   /* 0x417f1d */
+    if (outcode(e,x0,y0) & outcode(e,x1,y1)) return 1;                    /* trivially out */
+    /* Cohen-Sutherland; clip box inclusive max = clip+size-1 */
+    int xmax = e->clipX + e->clipW - 1, ymax = e->clipY + e->clipH - 1;
+    while (outcode(e,x0,y0) || outcode(e,x1,y1)) {
+        /* always move point 0, then swap the two endpoints and loop (0x417c0f) */
+        if (x0 < e->clipX && x1 != x0) { y0 = (s16)(y0 + (y1-y0)*(e->clipX-x0)/(x1-x0)); x0 = (s16)e->clipX; }
+        if (y0 < e->clipY && y1 != y0) { x0 = (s16)(x0 + (x1-x0)*(e->clipY-y0)/(y1-y0)); y0 = (s16)e->clipY; }
+        if (x0 > xmax     && x1 != x0) { y0 = (s16)(y0 + (y1-y0)*(xmax-x0)/(x1-x0));     x0 = (s16)xmax; }
+        if (y0 > ymax     && y1 != y0) { x0 = (s16)(x0 + (x1-x0)*(ymax-y0)/(y1-y0));     y0 = (s16)ymax; }
+        if (outcode(e,x0,y0)) return 1;          /* still outside after one pass -> reject */
+        swap(x0,x1); swap(y0,y1);
+    }
+    /* C integer division truncates toward zero; results truncated to int16 */
+    int dx = (s16)abs(x1-x0), dy = (s16)abs(y1-y0);
+    int n, incE, incNE, d, sx1, sy1, sx2, sy2;      /* two step vectors */
+    if (dx >= dy) { n = dx+1; incE = 2*dy; incNE = 2*(dy-dx); d = 2*dy-dx;
+                    sx1=1; sy1=0; sx2=1; sy2=1; }
+    else          { n = dy+1; incE = 2*dx; incNE = 2*(dx-dy); d = 2*dx-dy;
+                    sx1=0; sy1=1; sx2=1; sy2=1; }
+    if (x0 > x1) { sx1 = -sx1; sx2 = -sx2; }
+    if (y0 > y1) { sy1 = -sy1; sy2 = -sy2; }
+    e->ops->setPaintMode(mode);                       /* no-op */
+    return e->ops->bresenham(e, n, x0, y0, d, incE, sx1, sy1, incNE, sx2, sy2, color); /* slot 8 */
+}
+/* ops8 bresenham 0x42c017 (args: e,n,x,y,d,incE,(s16)sxE,(s16)syE,incNE,(s16)sxNE,(s16)syNE,color):
+ *   while (n--) { data[(u16)(x + y*pitch)] = color;        // NB offset masked to 16 bits
+ *                 if (d < 0) { d += incE;  x += sxE;  y += syE; }
+ *                 else       { d += incNE; x += sxNE; y += syNE; } }
+ * Both endpoints are drawn (n = max(|dx|,|dy|)+1).
+ */
+
+/* ---------- polyline core 0x417e45(e, n, xs[], ys[], color, mode) ----------
+ * draws xs[i],ys[i] -> xs[i+1],ys[i+1] for i<n-1, then closes last->first. Corners are drawn twice.
+ * drawRect(x,y,w,h)  native 4 @0x425940: points (x,y),(x+w,y),(x+w,y+h),(x,y+h)
+ *                    => outline covers (w+1)x(h+1) pixels (Java semantics).
+ * drawTriangle(x1,y1,x2,y2,x3,y3) native 3 @0x42585a: closed 3-point polyline.
+ */
+
+/* ---------- fillTriangle(x1,y1,x2,y2,x3,y3) native 6 @0x425ba4 -> 0x41885c ---------- */
+int fillTriangleCore(EXimg *e, int x0,int y0, int x1,int y1, int x2,int y2, u8 color, int mode) {
+    if (!e || !e->data) return -2;
+    if (y1 < y0) swap(p0,p1);  if (y2 < y0) swap(p0,p2);  if (y2 < y1) swap(p1,p2);   /* sort by y */
+    if (y0 >= e->clipY + e->clipH) return -5;
+    if (y2 <  e->clipY)            return -5;
+    x0 <<= 16; x1 <<= 16; x2 <<= 16;                      /* 16.16 fixed point */
+    int xa = x0, xb = x0, xc = x1;                        /* xa: edge 0-1, xb: edge 0-2, xc: edge 1-2 */
+    int s01 = 0, s02 = 0, s12 = 0;
+    if (y1 - y0) s01 = (x1 - x0) / (y1 - y0);
+    if (y2 - y0) s02 = (x2 - x0) / (y2 - y0);
+    if (y2 - y1) s12 = (x2 - x1) / (y2 - y1);
+    /* top clipping -- BUG: uses absolute y instead of (clipY - y), only correct when clipY == 0 */
+    if (y1 <= e->clipY) {          /* whole upper half above clip */
+        xc -= y1 * s12;  xb -= y0 * s02;  y1 = y0 = e->clipY;
+    } else if (y0 <= e->clipY) {
+        xa -= y0 * s01;  xb -= y0 * s02;  y0 = e->clipY;
+    }
+    int yend = e->clipY + e->clipH;
+    if (y1 > yend) y2 = y1 = yend;  else if (y2 > yend) y2 = yend;
+    e->ops->setPaintMode(mode);    /* no-op */
+    for (int half = 0; half < 2; half++) {
+        for (int y = y0; y < y1; y++) {             /* bottom row of each half excluded */
+            int l = xa >> 16, r = xb >> 16;          /* arithmetic shift = floor */
+            if (r < l) swap(l, r);
+            if (l <= e->clipX + e->clipW && r >= e->clipX) {
+                if (l < e->clipX) l = e->clipX;
+                if (r >= e->clipX + e->clipW) r = e->clipX + e->clipW - 1;
+                if (l <= r) e->ops->hline(e, l, y, r - l + 1, color);   /* slot 6, memset */
+            }
+            xa += s01; xb += s02;
+        }
+        y0 = y1; y1 = y2; xa = xc; s01 = s12;        /* second half: edge 1-2 replaces 0-1 */
+    }
+    return 1;
+}
+/* Coverage rule: rows [ymin, ymax) (last scanline never drawn), x span [floor(l), floor(r)] inclusive.
+ * A flat triangle (y0==y2) draws nothing. One indirect call per scanline span. */
+
+/* ---------- fillTextureTriangle(x1,y1,x2,y2,x3,y3, TextureMap tm) native 8 @0x425dd8 -> 0x4181e8 ----
+ * TextureMap fields: ptU int[] (+0x18), ptV int[] (+0x1c), pixImage Image (+0x20).
+ * Requires ptU.length == ptV.length >= 3; uses ptU[0..2], ptV[0..2] as texel coords of vertices 1..3.
+ * Core args: (dst, x1,y1,x2,y2,x3,y3, u1,v1,u2,v2,u3,v3, (s16)curPaintMode, srcEXimg).
+ * Same structure as fillTriangleCore (sort by y, same top-clip bug), but x,u,v are all
+ *   v = (v << 16) + 0x8000 (16.16 with +0.5 rounding) and interpolated along edges;
+ * per scanline 0x418726: du = (u_r-u_l)/(x_r-x_l), dv likewise (if x_r != x_l); order l<=r;
+ *   reject if l >= clipX+clipW or r < clipX; if l < clipX: u -= l*du; v -= l*dv; l = clipX   (same
+ *   absolute-coordinate bug as above); r clamped to clipX+clipW-1; len = r-l+1;
+ *   ops->texSpan(dst, u, v, l, y, len, du, dv, src)  (slot 9).
+ * ops8 texSpan 0x42c0be:
+ *   fails (-1) if src->depth > dst->depth or dst->palCount != 0 (target must be raw RGB332);
+ *   lut = paletteLUT(src)   -- if src has no palette lut==NULL => crash in original;
+ *   u += 0x2000; v += 0x2000;
+ *   8bpp src: for each px: *d++ = lut[ src->data[(v>>16)*src->pitch + (u>>16)] ]; u+=du; v+=dv;
+ *   4bpp src: u >>= 1; du >>= 1; texel byte = data[(v>>16)*pitch + (u>>16)];
+ *             nibble = ((u>>16) & ~1) ? byte>>4 : byte;  nibble &= 0xF;   (BUG: tests &~1, not &1)
+ *   No wrapping or bounds checks on u,v.
+ * ops4 texSpan is a stub -> nothing drawn on 4bpp targets.        conf: medium (edge walk skimmed)
+ */

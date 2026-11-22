@@ -1,0 +1,108 @@
+/* exen.Resource natives (indices 30..42 in the native table at 0x457c08).
+ * Decompiled from gensimu.exe by hand; confidence noted per function.
+ *
+ * Native ABI (all natives): u16 fn(u32 *args, Object *self)
+ *   args[0]   = receiver ref for instance methods (first declared arg for static ones),
+ *   args[1..] = declared args (one 32-bit word each; long = 2 words),
+ *   result    = written to args[0]; return value = number of result words (0 or 1).
+ *   self      = dereferenced receiver; Java instance fields start at self+0x18, 4 bytes per slot.
+ *
+ * exen.Resource instance fields (field table of class block 0x44b370):
+ *   +0x18 _start   absolute file offset of the resource in the .exn
+ *   +0x1c _len     resource length in bytes
+ *   +0x20 _offset  current read position, relative to _start
+ *   +0x24 _id      resource index (written by bytecode, NOT by init())
+ *   +0x28 _array   byte[] (bytecode-side)
+ *
+ * Globals:
+ *   G = *(VMGlobals**)0x45ff3c
+ *   G->res (G+0x28): +0x0 u32 *offsets  (N+1 absolute offsets, read from .exn @0x38)
+ *                    +0x4 u8  *types    (N type tags)
+ *                    +0x8 u32  count    (N, read from .exn @0x34)
+ *   G->file (G+0x14)->+4 : open FILE* of the .exn (seek 0x403680 -> fseek SEEK_SET via 0x433bf4,
+ *                          read 0x403648 -> fread via 0x433b8f). Both return 1 on success.
+ *   The header loader is 0x406c85 -> 0x406d1a (magic "NEXE"), 0x406d8a (16 bytes @4 stored as 4 x (u16,u16)
+ *   at res+0x4f0), 0x406eeb (count @0x34, offsets[N+1] then types[N]), 0x406fc8 (code chunk at
+ *   align4(offsets[N]) loaded into RAM, 4CVP blocks enumerated).
+ *   Win32/CRT-specific: resource data is NOT kept in memory; every read below does fseek+fread on the
+ *   .exn file. A port should map/load the file once.
+ *
+ * Helpers: alloc_array(len16, typecode, classhash) = 0x410106 (typecode 0x190 byte[], 0x115 short[],
+ *   0x159 int[], 0x150 char[]); arrays: u16 length at +0x12, elements at +0x14.
+ *   new_object(0x99, classhash) = 0x410067. malloc 0x403fd0, free 0x4040a4. log 0x434771.
+ *   throw_internal(code) = 0x407a13.
+ */
+
+/* 30  Resource.init(I)B[]  @0x428aa0   conf high */
+u16 Resource_init(u32 *a, Res *r) {
+    int id = a[1];
+    r->_start = r->_len = r->_offset = 0;
+    if (id >= 0 && id < G->res.count) {
+        r->_start = G->res.offsets[id];
+        r->_len   = G->res.offsets[id+1] - G->res.offsets[id];
+    } else { log("...Resource init : ID out of range !! "); throw_internal(0); }
+    a[0] = 0;              /* always returns null despite the B[] signature */
+    return 1;
+}
+
+/* 31..35 scalar reads. Common pattern, conf high:
+ *   if (r->_offset + n > r->_len) -> result 0 (no exception);
+ *   fseek(_start+_offset); fread(tmp, n); _offset += n;
+ * Values are read raw into an x86 int => LITTLE-ENDIAN. */
+/* 31 readBoolean()Z @0x428b4e : n=1, result = tmp & 1                         */
+/* 32 readInt()I     @0x428be5 : n=4, result = (s32)LE32                        */
+/* 33 readShort()S   @0x428c79 : n=2, result = (s32)(s16)LE16. On failure only the low
+ *                               16 bits of args[0] are cleared (mov word [args],0).  */
+/* 34 readByte()B    @0x428d0d : n=1, result = (s32)(s8)byte                    */
+/* 35 readChar()C    @0x428da2 : n=1 (!), result = (u8)byte; writes ONLY the low 16 bits of
+ *                               args[0] (upper half keeps the receiver ref bits) - quirk.  */
+
+/* 36  readBytes(I)B[]  @0x428e41   conf high (decompression internals: low) */
+u16 Resource_readBytes(u32 *a, Res *r) {
+    int n = a[1];
+    if (n <= 0) { a[0] = 0; return 1; }
+    Array *arr = alloc_array((u16)n, 0x190, 0x5da4d0c7);     /* length truncated to 16 bits */
+    if (!arr) { log("[Not Enough Memory] - Resource.readBytes"); throw_internal(0); a[0]=0; return 1; }
+    u8 *dst = arr->data;                                      /* arr+0x14 */
+    if (G->res.types[r->_id] == 0x81) {                       /* compressed resource */
+        int remain = r->_len - r->_offset;
+        u8 *src = dst + n - remain;                           /* in-place: packed data at the tail */
+        fseek(_start+_offset); fread(src, remain);            /* failure -> null */
+        Decoder *d = decoder_new(src, remain);                /* 0x432e50: method = src[0] >> 4,
+                                    1->0x42f560 2->0x431750 3->0x42d500 4->0x432180 5->0x432a00 */
+        d->decode(d, dst, n);  d->close(d);  free(d);
+    } else {
+        if (r->_offset + n > r->_len) { a[0] = 0; return 1; }
+        fseek(_start+_offset); fread(dst, n);
+    }
+    r->_offset += n;          /* NB: advanced by n (the unpacked size) even for 0x81 */
+    a[0] = (u32)arr; return 1;
+}
+
+/* 37 readShorts(I)S[] @0x42908e: requires 0 < n <= (_len-_offset)/2; short[] of n; raw fread of 2n
+ *    bytes (LE, no swap); _offset += 2n. Else null.  conf high
+ * 38 readInts(I)I[]   @0x429177: same with 4n bytes, int[].  conf high */
+
+/* 39  readUTF()LString;  @0x429265   conf high */
+u16 Resource_readUTF(u32 *a, Res *r) {
+    int remain = r->_len - r->_offset;   if (remain <= 0) -> null
+    u8 *buf = malloc(remain); fseek; fread(buf, remain);
+    int blen = (buf[0] << 8) | buf[1];   /* BIG-ENDIAN u16 length (DataInput style) */
+    if (blen == 0 || r->_offset + blen + 2 > r->_len) -> null
+    /* count chars: byte 0x00 -> skip 2; <0x7f -> 1; (b&0xf0)==0xe0 -> 3; else 2 */
+    String *s = new_object(0x99, 0x7772dde3);               /* java.lang.String */
+    Array *ch = alloc_array((u8)nchars, 0x150, 0x9ec04138);  /* char[]; count TRUNCATED TO 8 BITS */
+    ch->lock++;                                             /* byte at +0xe */
+    /* decode modified UTF-8; 0x00 byte => char 0 and skip 2; each char stored as ONE BYTE
+       (chars are 8-bit in this VM: c = low 8 bits of the decoded code point) */
+    s->+0x20 = ch;  s->+0x18 = (u32)(ch+0x12) /* ptr to {u16 len; u8 chars[]} */;  s->+0x1c = 0;
+    r->_offset += blen + 2;   free(buf);   a[0] = s; return 1;
+}
+
+/* 40  readString(I)LString;  @0x4295df   conf high
+ *  Reads everything from _offset to end, skips k = a[1] strings separated by 0xFF bytes, then takes
+ *  bytes up to the next 0xFF (or end) as an 8-bit String (length truncated to u8).
+ *  If fewer than k separators -> null.  _offset is NOT advanced.  */
+
+/* 41 static getNbResources()I @0x4297fa : a[0] = G->res.count.                 conf high
+ * 42 getResourceType()I       @0x429813 : a[0] = (0<=_id<count) ? types[_id] : 0. conf high */

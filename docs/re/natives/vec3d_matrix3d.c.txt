@@ -1,0 +1,38 @@
+/* exen.Vector3D (fields x,y,z at obj+0x18/+0x1c/+0x20) and exen.Matrix3D (obj+0x18 -> int[16],
+   data at array+0x14, row-major m[r*4+c]). All 16.16 fixed point. M(a,b) = (a>>8)*(b>>8).
+   No globals except the Math cos table; no Win32. */
+#define M(a,b) (((a)>>8)*((b)>>8))
+int sqlen(int v[3]) { return M(v[0],v[0]) + M(v[1],v[1]) + M(v[2],v[2]); }   /* 0x41ceb4 */
+int len3(int v[3])  { return isqrt_(sqlen(v)) << 8; }                         /* 0x41cefa */
+int normalise(int v[3]) {                                                     /* 0x41cf17 */
+    int l = len3(v);
+    if (l <= 0) return -5;               /* native 0x42a0c8 writes -1, vector unchanged */
+    if (l < 0x10000) { int f = 0x10000 / l; v[0]*=f; v[1]*=f; v[2]*=f; }
+    else { int d = l >> 16; v[0]/=d; v[1]/=d; v[2]/=d; }
+    return 1;
+}
+/* sum 0x41cfc7: o=a+b;  minus 0x41d004: o=a-b;  dot 0x41d041: sum M(a_i,b_i);
+   cross 0x41d090: o0=M(a1,b2)-M(a2,b1); o1=M(a2,b0)-M(a0,b2); o2=M(a0,b1)-M(a1,b0);
+   scale 0x41d12b: v_i = M(v_i, s).
+   Natives 0x42a132.. : a = this, b = args[1]; result stored into this (dot returns int). */
+void vecmat(int v[3], int m[16], int o[3]) {   /* 0x41d17b: row vector, 3x3 only, NO translation */
+    for (int c = 0; c < 3; c++) o[c] = M(m[c],v[0]) + M(m[4+c],v[1]) + M(m[8+c],v[2]);
+}
+void matmul(int A[16], int B[16], int C[16]) { /* 0x41d396: C = A x B */
+    for (int i=0;i<4;i++) for (int j=0;j<4;j++) {
+        C[i*4+j] = 0;
+        for (int k=0;k<4;k++) C[i*4+j] += M(A[i*4+k], B[k*4+j]);
+    }
+}
+void copy16(int *d, const int *s) { for (int i=0;i<16;i++) d[i] = s ? s[i] : 0; } /* 0x41d47c */
+void rotX(int m[16], int a) { copy16(m,0); m[0]=0x10000; m[15]=0x10000;
+    m[5]=cos_(a); m[6]=sin_(a); m[9]=-m[6]; m[10]=m[5]; }                     /* 0x41d25b */
+void rotY(int m[16], int a) { copy16(m,0); m[0]=cos_(a); m[2]=-sin_(a);
+    m[8]=-m[2]; m[10]=m[0]; m[5]=0x10000; m[15]=0x10000; }                    /* 0x41d2c4 */
+void rotZ(int m[16], int a) { copy16(m,0); m[0]=cos_(a); m[1]=sin_(a);
+    m[4]=-m[1]; m[5]=m[0]; m[10]=0x10000; m[15]=0x10000; }                    /* 0x41d32e */
+/* Natives: rotX/Y/Z (0x426b89/0x426be3/0x426c3d) build into a temp then copy into this.m
+   (overwrite, not multiply). multiply(Matrix3D o) 0x426c97: this.m = this.m x o.m.
+   multiply(Vector3D in, Vector3D out) 0x426d7b: out = vecmat(in, this.m).
+   copyFrom(int[] src) 0x426b20: copy 16 ints; null -> log 0x45b778 + fatal interrupt 0x407a13(1).
+   Null this.m in rot*/multiply: log "matrix 3d copy : null pointer", return. */

@@ -1,0 +1,75 @@
+// Melody player of gensimu.exe. Decompiled by hand from 0x43b192 (start), 0x43ad57 (timer proc),
+// 0x43b259 (stop) and 0x43ac4e (volume). Confidence: high for the control flow, medium for 0x85.
+// WIN32: midiOut*, SetTimer/KillTimer. Replace these with a portable synth/MIDI sink and a scheduler.
+// Globals: mel_ptr 0x519fe0, mel_size 0x519fe4, hmidi 0x519fe8, cur_dur 0x519fec,
+//          ev_count 0x4c658c, shortmsg 0x4c6590, prev 0x4c6594 (u16), ch 0x4c6596 (u8),
+//          period 0x4c6598, tempo 0x45caac (=120), need_open 0x45cab0.
+
+static const uint8_t dur[14] = {0xc0,0x80,0x60,0x40,0x30,0x20,0x18,0x10,0x0c,8,6,4,3,2};
+
+int melody_start(uint8_t *mel, uint32_t size) {        // 0x43b192, via EXManufMelodyPlay 0x434790
+    mel_ptr = mel;
+    if (need_open) {                          // the flag starts at 1 and is never cleared, so
+        if (midiOutOpen(&hmidi, 0, 0, 0, 0) == 1 /*MMSYSERR_ERROR*/) return;   // the device is
+        need_open = 1;                        // re-opened on every play (stop closes it again)
+    }
+    mel_size = size;          // = byte length of the Java byte[]
+    ev_count = 0;
+    midiOutSetVolume(hmidi, 0x80808080);
+    prev = 0xffff;
+    SetTimer(hwnd, 10, 10, melody_tick);
+}
+
+void CALLBACK melody_tick(HWND, UINT, UINT_PTR, DWORD) {   // 0x43ad57
+    if (prev >= 1) {                         // note-off for the previous note (prev==0xffff on the first tick, also >=1)
+        cur_dur = dur[mel_ptr[1] % 14];      // (recomputed from the *current* pair, unused here)
+        shortmsg = (0x80 | ch) | (prev << 8);
+        midiOutShortMsg(hmidi, shortmsg);
+    }
+    if (++ev_count >= mel_size) return;      // NOTE: counts events and compares with the byte length
+    prev = mel_ptr[0];
+    if (prev > 0x7f) {                       // command
+        uint8_t b = mel_ptr[1];
+        cur_dur = 0;
+        switch (prev - 0x80) {
+        case 0: ch = b & 0x0f; break;                                         // 0x80 set channel
+        case 1: if (b == 0) { ch = 9; midiOutShortMsg(hmidi, 0xC0 | ch); }    // 0x81 program
+                else if (b <= 0x80) midiOutShortMsg(hmidi, 0x4000C0 | ch | (b << 8));
+                break;
+        case 2: cur_dur = dur[b % 14]; break;                                 // 0x82 rest (see below)
+        case 3: period = 1875 / b; SetTimer(hwnd, 10, period, melody_tick); break; // 0x83 retime
+        case 4: set_volume(b); break;                                         // 0x84 volume, 0x43ac4e
+        case 5: /* balance: midiOutGetVolume, then move L or R byte depending on b >= 0x80 */ break;
+        }
+        if (prev != 0x82) { mel_ptr += 2; melody_tick(...); }   // process the next pair immediately
+        return;                                                  // 0x82: wait for the next tick
+    }
+    if (prev == 0) {                         // end marker
+        if (mel_size > 2) { need_open = 1; melody_stop(); }
+        return;
+    }
+    midiOutShortMsg(hmidi, (0x90 | ch) | (prev << 8) | (0x40 << 16));    // note-on, velocity 64
+    mel_ptr += 2;
+    period = (1875 / tempo) * cur_dur;       // 1875/120 = 15 (integer) -> 15 ms per duration unit
+    SetTimer(hwnd, 10, period, melody_tick);
+}
+
+void melody_stop(void) {                     // 0x43b259, via EXManufMelodyStop 0x4347bb
+    ev_count = mel_size;
+    KillTimer(hwnd, 10);
+    midiOutShortMsg(hmidi, 0xff);            // system reset
+    midiOutClose(hmidi);
+    need_open = 1;
+}
+
+void set_volume(uint8_t v) {                 // 0x43ac4e, also EXManufSetVolume
+    DWORD cur; midiOutGetVolume(hmidi, &cur);
+    // if left byte == right byte: set all four bytes to v (0xvvvvvvvv); else keep the
+    // channel layout and set only the channel(s) that were nonzero.
+    midiOutSetVolume(hmidi, ...);
+}
+
+// Durations at tempo 120: unit = 15 ms, so dur 0xc0 = 2880 ms (whole note?), 0x30 = 720 ms, 2 = 30 ms.
+// Note: cur_dur used for a note is the value left by the *previous* call's first branch
+// (dur[next_pair.b % 14]), so in effect each note's length comes from its own b byte, because the
+// note-off step at the top recomputes it from mel_ptr[1] before the note is handled.
