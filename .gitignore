@@ -1,0 +1,28 @@
+# local, machine-specific configuration
+local.env
+*.local.*
+
+# build outputs
+/build/
+/bin/
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+!vendor/gensimu/gensimu.exe
+
+# runtime artifacts
+simulator.log
+/screenshots/
+/states/
+/saves/
+__pycache__/
+*.pyc
+
+# games are never committed
+*.exn
+!vendor/gensimu/flash/*.exn
