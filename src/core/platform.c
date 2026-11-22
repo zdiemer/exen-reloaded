@@ -312,8 +312,8 @@ static int n_getVersionInfo(ExenVM *vm, uint32_t *a)
 {
     const uint8_t *c = vm->plat->eeprom;
     /* movsx: bytes >= 0x80 OR ones into the higher bits */
-    a[0] = (uint32_t)((int32_t)(int8_t)c[4] << 24) | (uint32_t)((int32_t)(int8_t)c[5] << 16) |
-           (uint32_t)((int32_t)(int8_t)c[6] << 8) | (uint32_t)(int32_t)(int8_t)c[7];
+    a[0] = ((uint32_t)(int32_t)(int8_t)c[4] << 24) | ((uint32_t)(int32_t)(int8_t)c[5] << 16) |
+           ((uint32_t)(int32_t)(int8_t)c[6] << 8) | (uint32_t)(int32_t)(int8_t)c[7];
     return 1;
 }
 
