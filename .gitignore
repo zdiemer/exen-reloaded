@@ -4,6 +4,7 @@ local.env
 
 # build outputs
 /build/
+/build-*/
 /bin/
 *.o
 *.obj

@@ -71,7 +71,7 @@ void exen_destroy(ExenVM *vm)
 
 const char *exen_error(ExenVM *vm)
 {
-    if (vm->halted)
+    if (vm->halted && !vm->error_after_halt)
         return vm->halt_reason;
     return vm->error;
 }
@@ -153,6 +153,9 @@ int exen_load_game(ExenVM *vm, const uint8_t *exn, size_t len)
         set_error(vm, "class setup failed");
         return -1;
     }
+    /* identity of the loaded framework + game, checked by exen_state_load */
+    vm->exn_crc = exen_crc32(exn, len);
+    vm->code_crc = exen_crc32(vm->mem, vm->code_end);
     return 0;
 }
 

@@ -29,6 +29,7 @@ add_library(exen_core STATIC
   src/core/raycast.c
   src/core/resource.c
   src/core/sms.c
+  src/core/state.c
   src/core/ui.c
   src/core/vec3d.c
 )
@@ -55,9 +56,23 @@ if(EXEN_BUILD_SDL)
     FetchContent_MakeAvailable(SDL3)
   endif()
   if(TARGET SDL3::SDL3)
-    add_executable(exen-reloaded WIN32 src/sdl/main.c)
+    add_executable(exen-reloaded WIN32 src/sdl/main.c src/sdl/input.c src/sdl/paths.c
+      src/sdl/persist.c)
     target_link_libraries(exen-reloaded PRIVATE exen_core SDL3::SDL3)
+    # Input bindings test: synthetic events, no window or gamepad needed.
+    add_executable(sdl-input-test tests/sdl_input_test.c src/sdl/input.c)
+    target_include_directories(sdl-input-test PRIVATE src/sdl)
+    target_link_libraries(sdl-input-test PRIVATE exen_core SDL3::SDL3)
+    add_test(NAME sdl_input COMMAND sdl-input-test)
   else()
     message(WARNING "SDL3 not found; the SDL frontend will not be built")
   endif()
+endif()
+
+# Tests: ctest --test-dir build --output-on-failure. enable_testing() is unconditional so that
+# tests declared above (sdl_input) register too; EXEN_BUILD_TESTS adds the unit tests in tests/.
+option(EXEN_BUILD_TESTS "Build the unit tests" OFF)
+enable_testing()
+if(EXEN_BUILD_TESTS)
+  add_subdirectory(tests)
 endif()

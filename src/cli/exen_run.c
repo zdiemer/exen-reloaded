@@ -7,6 +7,12 @@
  * unimplemented ones flagged. Frames can be dumped as PNG, the audio rendered to a WAV file in
  * step with the virtual clock, and key presses scripted (--help).
  * The compatibility harness builds on this.
+ *
+ * Save states: --save-at N FILE writes a state before tick N, --load FILE resumes from one
+ * (the file is the core's state followed by a 16-byte trailer with this runner's own clock:
+ * "XRUN", tick, virtual ms, frames presented), and --selftest-state checks that a state round
+ * trip is exact: run to tick N, save, run on to the last tick recording every frame, the audio
+ * and the final state; then load the state into a fresh VM, run to the same tick, and compare.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,11 +34,45 @@ typedef struct {
     int dump_every, scale;
     int melodies;
     int log_melodies;
+    /* --selftest-state: CRC of every frame presented while `record` is set */
+    int record, nrec, caprec;
+    uint32_t *rec;
+    int loading;   /* a state load presents the restored screen: not a game frame */
+    int eeprom_writes;
 } Run;
+
+static uint32_t crc32_update(uint32_t c, const uint8_t *p, size_t n)
+{
+    static uint32_t t[256];
+    if (!t[1])
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t v = i;
+            for (int k = 0; k < 8; k++)
+                v = (v & 1) ? (v >> 1) ^ 0xedb88320u : v >> 1;
+            t[i] = v;
+        }
+    c = ~c;
+    while (n--)
+        c = t[(c ^ *p++) & 0xff] ^ (c >> 8);
+    return ~c;
+}
 
 static void on_present(void *u, const uint8_t *px, int w, int h)
 {
     Run *r = u;
+    if (r->loading)
+        return;
+    if (r->record) {
+        if (r->nrec == r->caprec) {
+            int nc = r->caprec ? r->caprec * 2 : 256;
+            uint32_t *n = realloc(r->rec, (size_t)nc * sizeof *n);
+            if (!n)
+                return;
+            r->rec = n;
+            r->caprec = nc;
+        }
+        r->rec[r->nrec++] = crc32_update(0, px, (size_t)w * (size_t)h);
+    }
     if (r->dump_dir && r->frames % r->dump_every == 0) {
         char path[1024];
         snprintf(path, sizeof path, "%s/frame_%05d_t%05d.png", r->dump_dir, r->frames, r->tick);
@@ -60,6 +100,7 @@ static void on_melody_stop(void *u)
     if (r->log_melodies)
         printf("melody stop t=%u ms\n", r->now_ms);
 }
+static void on_eeprom(void *u) { ((Run *)u)->eeprom_writes++; }
 static void on_log(void *u, const char *m)
 {
     if (!((Run *)u)->quiet)
@@ -86,9 +127,11 @@ static uint8_t *slurp(const char *path, size_t *len)
 
 /* WAV output: 16-bit stereo PCM. The sizes are patched in when the file is closed. */
 typedef struct {
-    FILE *f;
+    FILE *f;       /* NULL: render only (--selftest-state hashes the audio) */
+    int on;
     uint32_t frames;
     int rate;
+    uint32_t crc;
     int16_t buf[2 * 4096];
 } Wav;
 
@@ -126,7 +169,9 @@ static void wav_render_to(Wav *w, ExenVM *vm, uint32_t ms)
             le[2 * i] = (uint8_t)w->buf[i];
             le[2 * i + 1] = (uint8_t)((uint16_t)w->buf[i] >> 8);
         }
-        fwrite(le, 4, (size_t)n, w->f);
+        if (w->f)
+            fwrite(le, 4, (size_t)n, w->f);
+        w->crc = crc32_update(w->crc, le, (size_t)n * 4);
         w->frames += (uint32_t)n;
     }
 }
@@ -193,6 +238,7 @@ static void usage(void)
             "  --size WxH        screen size (default: the game's handset from the game\n"
             "                    database, else 132x176)\n"
             "  --eeprom FILE     initial 2048-byte EEPROM image\n"
+            "  --eeprom-out FILE write the EEPROM image to FILE at the end (may equal --eeprom)\n"
             "  --dump DIR        write presented frames as DIR/frame_NNNNN_tTTTTT.png\n"
             "                    (N = frame number, T = tick it was presented in)\n"
             "  --dump-every N    only every Nth presented frame (default 1)\n"
@@ -207,15 +253,259 @@ static void usage(void)
             "                    with the virtual clock\n"
             "  --rate HZ         audio sample rate (default 44100)\n"
             "  --melodies        print each melody the game starts (time and bytes)\n"
+            "  --save-at N FILE  write a save state to FILE just before tick N\n"
+            "  --load FILE       resume from a state written by --save-at instead of booting;\n"
+            "                    ticks continue from the saved tick up to --frames\n"
+            "  --selftest-state  check that a save state round trip is exact: save before tick\n"
+            "                    N (--save-at N, FILE optional; default --frames / 2), run to\n"
+            "                    --frames, then load the state into a fresh VM and run again.\n"
+            "                    Frames, audio and the final state must be identical. Prints\n"
+            "                    PASS or FAIL; exit status 0 or 1.\n"
             "  --quiet           no VM log\n");
+}
+
+typedef struct {
+    const uint8_t *sim, *game, *eeprom;
+    size_t sl, gl, el;
+    int sw, sh, rate;
+} Inputs;
+
+static ExenVM *make_vm(const Inputs *in, Run *run)
+{
+    ExenConfig cfg = {0};
+    cfg.screen_width = in->sw;
+    cfg.screen_height = in->sh;
+    cfg.audio_rate = in->rate;
+    cfg.host = (ExenHost){
+        .user = run,
+        .present = on_present,
+        .set_timer = on_timer,
+        .ticks_ms = on_ticks,
+        .melody_play = on_melody,
+        .melody_stop = on_melody_stop,
+        .log = on_log,
+        .eeprom_changed = on_eeprom,
+    };
+    ExenVM *vm = exen_create(&cfg);
+    if (!vm || exen_load_framework(vm, in->sim, in->sl) < 0 ||
+        exen_load_game(vm, in->game, in->gl) < 0) {
+        fprintf(stderr, "load failed: %s\n", vm ? exen_error(vm) : "out of memory");
+        exen_destroy(vm);
+        return NULL;
+    }
+    if (in->eeprom)
+        memcpy(exen_eeprom(vm), in->eeprom, in->el < EXEN_EEPROM_SIZE ? in->el : EXEN_EEPROM_SIZE);
+    return vm;
+}
+
+/* Deliver ticks [*tick, to): the scripted keys, then the virtual clock advances, the audio is
+ * rendered up to it and the tick runs. */
+static int run_ticks(ExenVM *vm, Run *run, Wav *wav, int *tick, int to, const KeyEv *keys,
+                     int nkeys)
+{
+    int rc = 0;
+    for (; rc == 0 && *tick < to && !exen_halted(vm); (*tick)++) {
+        int t = *tick;
+        run->tick = t;
+        for (int k = 0; k < nkeys && rc == 0; k++) {
+            if (keys[k].tick == t)
+                rc = exen_key(vm, keys[k].key, 1);
+            if (rc == 0 && keys[k].tick + keys[k].hold == t)
+                rc = exen_key(vm, keys[k].key, 0);
+        }
+        if (rc != 0 || exen_halted(vm))
+            break;
+        run->now_ms += run->period > 0 ? (uint32_t)run->period : 100;
+        if (wav->on) /* the audio up to this tick, which plays what earlier events started */
+            wav_render_to(wav, vm, run->now_ms);
+        rc = exen_tick(vm);
+    }
+    return rc;
+}
+
+/* The current state in a malloc'd buffer, or NULL with a message. */
+static uint8_t *take_state(ExenVM *vm, size_t *len)
+{
+    size_t n = exen_state_size(vm);
+    uint8_t *b = n ? malloc(n) : NULL;
+    int r = b ? exen_state_save(vm, b, n) : -1;
+    if (r < 0) {
+        fprintf(stderr, "save state failed: %s\n", exen_error(vm));
+        free(b);
+        return NULL;
+    }
+    *len = (size_t)r;
+    return b;
+}
+
+/* A --save-at file is the core's state followed by this runner's clock. */
+#define TRAILER 16
+
+static int write_state_file(const char *path, ExenVM *vm, const Run *run, int tick)
+{
+    size_t n;
+    uint8_t *b = take_state(vm, &n);
+    if (!b)
+        return -1;
+    uint8_t t[TRAILER] = {'X', 'R', 'U', 'N'};
+    put32(t + 4, (uint32_t)tick);
+    put32(t + 8, run->now_ms);
+    put32(t + 12, (uint32_t)run->frames);
+    FILE *f = fopen(path, "wb");
+    int ok = f && fwrite(b, 1, n, f) == n && fwrite(t, 1, TRAILER, f) == TRAILER;
+    if (f && fclose(f) != 0)
+        ok = 0;
+    free(b);
+    if (!ok) {
+        fprintf(stderr, "cannot write %s\n", path);
+        return -1;
+    }
+    printf("state: saved %s before tick %d (%zu bytes)\n", path, tick, n);
+    return 0;
+}
+
+static uint32_t get32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* Resume `vm` from a --save-at file: the runner's clock first, so that the core's clock offset
+ * comes out right. */
+static int load_state_file(const char *path, ExenVM *vm, Run *run, Wav *wav, int *tick)
+{
+    size_t n;
+    uint8_t *b = slurp(path, &n);
+    if (!b) {
+        fprintf(stderr, "cannot read %s\n", path);
+        return -1;
+    }
+    if (n > TRAILER && !memcmp(b + n - TRAILER, "XRUN", 4)) {
+        *tick = (int)get32(b + n - TRAILER + 4);
+        run->now_ms = get32(b + n - TRAILER + 8);
+        run->frames = (int)get32(b + n - TRAILER + 12);
+    }
+    wav->frames = (uint32_t)((uint64_t)run->now_ms * (uint64_t)wav->rate / 1000u);
+    run->loading = 1;
+    int r = exen_state_load(vm, b, n);
+    run->loading = 0;
+    free(b);
+    if (r < 0) {
+        fprintf(stderr, "%s: %s\n", path, exen_error(vm));
+        return -1;
+    }
+    printf("state: loaded %s, resuming at tick %d\n", path, *tick);
+    return 0;
+}
+
+static int same(const uint8_t *a, size_t an, const uint8_t *b, size_t bn)
+{
+    return a && b && an == bn && !memcmp(a, b, an);
+}
+
+/* --selftest-state: run A boots, runs to tick n, saves S, runs on to m. Run B loads S into a
+ * fresh VM and runs to m. Compared: S against a state taken right after the load, every frame
+ * presented after the save point, the audio rendered after it, and the final states. */
+static int selftest(const Inputs *in, int n, int m, const KeyEv *keys, int nkeys, int quiet,
+                    const char *save_path)
+{
+    static Wav wa, wb;
+    Run ra = {0}, rb = {0};
+    ra.period = rb.period = -1;
+    ra.dump_every = rb.dump_every = 1;
+    ra.quiet = rb.quiet = quiet;
+    wa.on = wb.on = 1;
+    int tick = 0;
+    size_t s1n = 0, s1bn = 0, san = 0, sbn = 0;
+    uint8_t *s1b = NULL, *sa = NULL, *sb = NULL;
+    const char *why = NULL;
+
+    ExenVM *a = make_vm(in, &ra);
+    if (!a)
+        return 2;
+    wa.rate = exen_audio_rate(a);
+    if (exen_boot(a) == 0)
+        run_ticks(a, &ra, &wa, &tick, n, keys, nkeys);
+    int save_tick = tick, halted_early = exen_halted(a);
+    if (save_path)
+        write_state_file(save_path, a, &ra, tick);
+    uint8_t *s1 = take_state(a, &s1n);
+    if (!s1) {
+        exen_destroy(a);
+        printf("selftest-state: FAIL (cannot save)\n");
+        return 1;
+    }
+    uint32_t a_ms = ra.now_ms, a_audio = wa.frames;
+    int a_frames = ra.frames;
+    ra.record = 1;
+    wa.crc = 0;
+    run_ticks(a, &ra, &wa, &tick, m, keys, nkeys);
+    int a_end = tick, a_halted = exen_halted(a);
+    sa = take_state(a, &san);
+
+    ExenVM *b = make_vm(in, &rb);
+    if (!b) {
+        exen_destroy(a);
+        free(s1);
+        return 2;
+    }
+    wb.rate = exen_audio_rate(b);
+    rb.now_ms = a_ms;
+    rb.frames = a_frames;
+    wb.frames = a_audio;
+    rb.loading = 1;
+    int lr = exen_state_load(b, s1, s1n);
+    rb.loading = 0;
+    if (lr < 0) {
+        why = exen_error(b);
+    } else {
+        s1b = take_state(b, &s1bn);
+        if (!same(s1, s1n, s1b, s1bn))
+            why = "the state taken right after the load differs from the saved one";
+        tick = save_tick;
+        rb.record = 1;
+        wb.crc = 0;
+        run_ticks(b, &rb, &wb, &tick, m, keys, nkeys);
+        sb = take_state(b, &sbn);
+        if (!why && (tick != a_end || exen_halted(b) != a_halted))
+            why = "the runs ended differently";
+        if (!why && rb.nrec != ra.nrec)
+            why = "different number of frames";
+        for (int i = 0; !why && i < ra.nrec; i++)
+            if (ra.rec[i] != rb.rec[i]) {
+                printf("selftest-state: frame %d after the save point differs\n", i);
+                why = "a frame differs";
+            }
+        if (!why && (wa.frames != wb.frames || wa.crc != wb.crc))
+            why = "the audio differs";
+        if (!why && !same(sa, san, sb, sbn))
+            why = "the final states differ";
+    }
+    if (!why)
+        printf("selftest-state: PASS (saved before tick %d%s, ran to tick %d%s; %d frames and "
+               "%u audio frames identical; state %zu bytes)\n",
+               save_tick, halted_early ? " (VM already halted)" : "", a_end,
+               a_halted && !halted_early ? " (halted)" : "", ra.nrec, wa.frames - a_audio, s1n);
+    else
+        printf("selftest-state: FAIL (%s; saved before tick %d, ran to tick %d)\n", why,
+               save_tick, a_end);
+    free(s1);
+    free(s1b);
+    free(sa);
+    free(sb);
+    free(ra.rec);
+    free(rb.rec);
+    exen_destroy(a);
+    exen_destroy(b);
+    return why ? 1 : 0;
 }
 
 int main(int argc, char **argv)
 {
-    const char *sim = NULL, *game = NULL, *eeprom = NULL, *wav_path = NULL;
+    const char *sim = NULL, *game = NULL, *eeprom = NULL, *eeprom_out = NULL, *wav_path = NULL;
+    const char *save_path = NULL, *load_path = NULL;
     static Wav wav;
     wav.rate = 44100;
-    int frames = 300, sw = 0, sh = 0;
+    int frames = 300, sw = 0, sh = 0, save_at = -1, self = 0;
     Run run = {0};
     run.period = -1;
     run.dump_every = 1;
@@ -233,7 +523,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--dump-every") && i + 1 < argc) run.dump_every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) run.scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--eeprom") && i + 1 < argc) eeprom = argv[++i];
-        else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
+        else if (!strcmp(argv[i], "--eeprom-out") && i + 1 < argc) eeprom_out = argv[++i];
+        else if (!strcmp(argv[i], "--load") && i + 1 < argc) load_path = argv[++i];
+        else if (!strcmp(argv[i], "--selftest-state")) self = 1;
+        else if (!strcmp(argv[i], "--save-at") && i + 1 < argc) {
+            save_at = atoi(argv[++i]);
+            /* FILE may be left out with --selftest-state */
+            size_t l = i + 1 < argc ? strlen(argv[i + 1]) : 0;
+            if (i + 2 < argc && strncmp(argv[i + 1], "--", 2) &&
+                !(l >= 4 && !strcmp(argv[i + 1] + l - 4, ".exn")))
+                save_path = argv[++i];
+        } else if (!strcmp(argv[i], "--size") && i + 1 < argc) {
             if (sscanf(argv[++i], "%dx%d", &sw, &sh) != 2) {
                 usage();
                 return 2;
@@ -254,7 +554,7 @@ int main(int argc, char **argv)
             game = argv[i];
         }
     }
-    if (!game) {
+    if (!game || (save_at >= 0 && !save_path && !self) || (self && load_path)) {
         usage();
         return 2;
     }
@@ -294,52 +594,49 @@ int main(int argc, char **argv)
     }
     printf("title: %s (%s)\nscreen: %dx%d\n", gi.title,
            gi.match == EXEN_GAME_EXACT ? "known" : gi.match ? "known main class" : "unknown game", sw, sh);
-    ExenConfig cfg = {0};
-    cfg.screen_width = sw;
-    cfg.screen_height = sh;
-    cfg.audio_rate = wav.rate;
-    cfg.host = (ExenHost){&run, on_present, on_timer, on_ticks, on_melody, on_melody_stop, on_log};
-    ExenVM *vm = exen_create(&cfg);
-    if (!vm || exen_load_framework(vm, simb, sl) < 0 || exen_load_game(vm, gameb, gl) < 0) {
-        fprintf(stderr, "load failed: %s\n", vm ? exen_error(vm) : "out of memory");
-        return 1;
-    }
+    Inputs in = {simb, gameb, NULL, sl, gl, 0, sw, sh, wav.rate};
+    uint8_t *eb = NULL;
     if (eeprom) {
-        size_t el;
-        uint8_t *eb = slurp(eeprom, &el);
+        eb = slurp(eeprom, &in.el);
         if (!eb) {
             fprintf(stderr, "cannot read %s\n", eeprom);
             return 2;
         }
-        memcpy(exen_eeprom(vm), eb, el < 2048 ? el : 2048);
-        free(eb);
+        in.eeprom = eb;
     }
+    if (self) {
+        int r = selftest(&in, save_at >= 0 ? save_at : frames / 2, frames, keys, nkeys,
+                         run.quiet, save_path);
+        free(eb);
+        free(simb);
+        free(gameb);
+        return r;
+    }
+    ExenVM *vm = make_vm(&in, &run);
+    if (!vm)
+        return 1;
+    wav.rate = exen_audio_rate(vm);
     if (wav_path) {
-        wav.rate = exen_audio_rate(vm);
         wav.f = fopen(wav_path, "wb");
         if (!wav.f) {
             fprintf(stderr, "cannot write %s\n", wav_path);
             return 2;
         }
+        wav.on = 1;
         wav_header(&wav);
     }
-    int rc = exen_boot(vm);
-    int ticks = 0;
-    for (; rc == 0 && ticks < frames && !exen_halted(vm); ticks++) {
-        run.tick = ticks;
-        for (int k = 0; k < nkeys && rc == 0; k++) {
-            if (keys[k].tick == ticks)
-                rc = exen_key(vm, keys[k].key, 1);
-            if (rc == 0 && keys[k].tick + keys[k].hold == ticks)
-                rc = exen_key(vm, keys[k].key, 0);
-        }
-        if (rc != 0 || exen_halted(vm))
-            break;
-        run.now_ms += run.period > 0 ? (uint32_t)run.period : 100;
-        if (wav.f) /* the audio up to this tick, which plays what earlier events started */
-            wav_render_to(&wav, vm, run.now_ms);
-        rc = exen_tick(vm);
+    int rc, ticks = 0;
+    if (load_path)
+        rc = load_state_file(load_path, vm, &run, &wav, &ticks);
+    else
+        rc = exen_boot(vm);
+    if (rc == 0 && save_at >= 0) {
+        rc = run_ticks(vm, &run, &wav, &ticks, save_at, keys, nkeys);
+        if (write_state_file(save_path, vm, &run, ticks) < 0)
+            rc = -1;
     }
+    if (rc == 0)
+        rc = run_ticks(vm, &run, &wav, &ticks, frames, keys, nkeys);
     if (wav.f) {
         /* one more period, so that what the last tick started is heard */
         wav_render_to(&wav, vm, run.now_ms + (run.period > 0 ? (uint32_t)run.period : 100));
@@ -360,9 +657,23 @@ int main(int argc, char **argv)
             printf("  #%-3d %-24s %-22s %8u%s\n", i, native_class(i), name, n,
                    native_implemented(i) ? "" : "   (unimplemented)");
     }
+    if (eeprom_out) {
+        FILE *f = fopen(eeprom_out, "wb");
+        int ok = f && fwrite(exen_eeprom(vm), 1, EXEN_EEPROM_SIZE, f) == EXEN_EEPROM_SIZE;
+        if (f && fclose(f) != 0)
+            ok = 0;
+        if (ok) {
+            printf("eeprom: wrote %s (%d change%s)\n", eeprom_out, run.eeprom_writes,
+                   run.eeprom_writes == 1 ? "" : "s");
+        } else {
+            fprintf(stderr, "cannot write %s\n", eeprom_out);
+            rc = -1;
+        }
+    }
     int halted = exen_halted(vm);
     exen_destroy(vm);
+    free(eb);
     free(simb);
     free(gameb);
-    return halted ? 1 : 0;
+    return halted || rc != 0 ? 1 : 0;
 }

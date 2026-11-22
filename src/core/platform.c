@@ -9,11 +9,128 @@
 
 enum { GL_GBUFF, GL_IMAGE }; /* exen.Gamelet instance slots */
 
-/* Per-game context storage. The original copies min(len, 300) bytes into the current gamelet's
- * record inside the 2048-byte EEPROM config (0x4153f8). The record layout is not decoded yet,
- * so we keep the 300 bytes at a fixed offset of the EEPROM image. */
-#define CTX_OFFSET 0x500
-#define CTX_SIZE 300
+/* EEPROM gamelet table (docs/re/NATIVES.md §3.1). The image is the simulator's config struct
+ * [0x45fe8c] verbatim (it is only scrambled on disk when its first u32 is nonzero, 0x402e4d).
+ * Bytes 0..0x21b are settings; at +0x21c a u16 record count, then from +0x224 variable-size
+ * records, each starting with a 0x1c-byte header whose +0x08 is the record size and +0x0c the
+ * gamelet id (-1 = no gamelet). The table code is 0x415580..0x415899; a game installed with
+ * File/Open gets a 0x260-byte record (0x417009) and becomes the current record
+ * ([[0x45ff3c]+0x14]+4, set at 0x4173c2 / 0x403b4c). saveCtx and loadCtx (0x4153f8 / 0x41547b)
+ * copy min(len, 300) bytes to / from the current record's +0x3c. */
+#define EE_GT_COUNT 0x21cu   /* u16 */
+#define EE_GT_LAST 0x21eu    /* u16, cleared when a gamelet is removed (0x41585a) */
+#define EE_GT_TABLE 0x224u
+#define GR_HDR 0x1cu
+#define GR_SIZE 0x08u
+#define GR_ID 0x0cu
+#define GR_NAME 0x28u        /* 0xff-terminated; the context follows at +0x3c */
+#define GR_NAME_MAX 19
+#define GR_CTX 0x3cu
+#define GR_RECSIZE 0x260u
+#define CTX_SIZE 300u
+
+/* The current game's id. The simulator takes it from the download session; the shipped image
+ * holds one File/Open record with id 0x80, which is also the u32 at .exn +0x04 in every known
+ * game, so we use that field (as the signed 16-bit value the simulator stores, 0x403b47). */
+static int32_t gamelet_id(ExenVM *vm)
+{
+    return vm->exn && vm->exn_len >= 8 ? (int32_t)(int16_t)rd16(vm->exn + 4) : 0x80;
+}
+
+/* Offset of the current game's record in the EEPROM, or -1. Walks the table like 0x415668,
+ * but stops at a record that does not fit the image instead of reading past it. */
+static int gt_find(ExenVM *vm, uint32_t *end)
+{
+    const uint8_t *e = vm->plat->eeprom;
+    uint32_t n = rd16(e + EE_GT_COUNT), off = EE_GT_TABLE;
+    int32_t id = gamelet_id(vm);
+    int found = -1;
+    for (uint32_t i = 0; i < n; i++) {
+        if (off + GR_HDR > EXEN_EEPROM_SIZE)
+            break;
+        uint32_t sz = rd32(e + off + GR_SIZE);
+        if (sz < GR_HDR || sz > EXEN_EEPROM_SIZE - off)
+            break;
+        if (found < 0 && (int32_t)rd32(e + off + GR_ID) == id && id != -1)
+            found = (int)off;
+        off += sz;
+    }
+    if (end)
+        *end = off;
+    return found;
+}
+
+static void gt_write_record(ExenVM *vm, uint32_t off)
+{
+    uint8_t *r = vm->plat->eeprom + off;
+    memset(r, 0, GR_RECSIZE);
+    wr32(r + 0x04, (uint32_t)vm->exn_len); /* [download+4]: the file size, as far as we can tell */
+    wr32(r + GR_SIZE, GR_RECSIZE);
+    wr32(r + GR_ID, (uint32_t)gamelet_id(vm));
+    wr32(r + 0x14, 2);                     /* 0x403be9(rec, 0), as in the shipped record */
+    wr32(r + 0x18, 1);
+    wr32(r + 0x24, vm->exn_crc);           /* the original stores a hash of the install time */
+    /* name: the game title, else the main class without its package */
+    ExenGameInfo gi;
+    const char *name = vm->main_class;
+    if (vm->exn && exen_game_info(vm->exn, vm->exn_len, &gi) != EXEN_GAME_UNKNOWN && gi.title[0])
+        name = gi.title;
+    else if (strrchr(name, '.'))
+        name = strrchr(name, '.') + 1;
+    size_t n = strlen(name);
+    if (n > GR_NAME_MAX)
+        n = GR_NAME_MAX;
+    memcpy(r + GR_NAME, name, n);
+    r[GR_NAME + n] = 0xff;
+}
+
+/* The current record's context, installing a record first if `install` and there is none. The
+ * original does nothing without a record; installing one lets a blank EEPROM keep saves. */
+static uint8_t *gt_context(ExenVM *vm, int install)
+{
+    uint8_t *e = vm->plat->eeprom;
+    uint32_t end;
+    int off = gt_find(vm, &end);
+    if (off < 0) {
+        if (!install)
+            return NULL;
+        /* append, after the last record that fits (the walk stopped there) */
+        if (end + GR_RECSIZE > EXEN_EEPROM_SIZE) {
+            plat_warn_once(vm, 30, "saveCtx: no room for the game's record in the EEPROM");
+            return NULL;
+        }
+        uint32_t n = 0, o = EE_GT_TABLE;
+        while (o < end) { /* count the records that fit; drop the rest */
+            o += rd32(e + o + GR_SIZE);
+            n++;
+        }
+        gt_write_record(vm, end);
+        wr16(e + EE_GT_COUNT, (uint16_t)(n + 1));
+        off = (int)end;
+    }
+    if (rd32(e + off + GR_SIZE) < GR_CTX + CTX_SIZE)
+        return NULL;
+    return e + off + GR_CTX;
+}
+
+void exen_eeprom_reset(ExenVM *vm, const uint8_t *defaults, size_t len)
+{
+    uint8_t *e = vm->plat->eeprom;
+    memset(e, 0, EXEN_EEPROM_SIZE);
+    if (defaults)
+        memcpy(e, defaults, len < EE_GT_COUNT ? len : EE_GT_COUNT);
+    wr16(e + EE_GT_COUNT, 1);
+    wr16(e + EE_GT_LAST, 0);
+    gt_write_record(vm, EE_GT_TABLE);
+    if (vm->host.eeprom_changed)
+        vm->host.eeprom_changed(vm->host.user);
+}
+
+uint32_t exen_vm_ticks(ExenVM *vm)
+{
+    uint32_t t = vm->host.ticks_ms ? vm->host.ticks_ms(vm->host.user) : 0;
+    return t + vm->clock_offset;
+}
 
 int platform_init(ExenVM *vm, const ExenConfig *cfg)
 {
@@ -127,7 +244,7 @@ static int n_throwInternalException(ExenVM *vm, uint32_t *a)
 
 static int n_getTimerTickCount(ExenVM *vm, uint32_t *a)
 {
-    a[0] = vm->host.ticks_ms ? vm->host.ticks_ms(vm->host.user) : 0;
+    a[0] = exen_vm_ticks(vm);
     return 1;
 }
 
@@ -151,7 +268,12 @@ static int n_saveCtx(ExenVM *vm, uint32_t *a)
         return 0;
     }
     uint32_t n = arr_len(vm, a[1]);
-    memcpy(vm->plat->eeprom + CTX_OFFSET, arr_data(vm, a[1]), n < CTX_SIZE ? n : CTX_SIZE);
+    uint8_t *ctx = gt_context(vm, 1);
+    if (!ctx)
+        return 0;
+    memcpy(ctx, arr_data(vm, a[1]), n < CTX_SIZE ? n : CTX_SIZE);
+    if (vm->host.eeprom_changed)
+        vm->host.eeprom_changed(vm->host.user);
     return 0;
 }
 
@@ -162,7 +284,9 @@ static int n_loadCtx(ExenVM *vm, uint32_t *a)
         return 0;
     }
     uint32_t n = arr_len(vm, a[1]);
-    memcpy(arr_data(vm, a[1]), vm->plat->eeprom + CTX_OFFSET, n < CTX_SIZE ? n : CTX_SIZE);
+    const uint8_t *ctx = gt_context(vm, 0);
+    if (ctx)
+        memcpy(arr_data(vm, a[1]), ctx, n < CTX_SIZE ? n : CTX_SIZE);
     return 0;
 }
 

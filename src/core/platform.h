@@ -1,7 +1,8 @@
 /* Platform state owned by the native layer (display, timer, EEPROM, font, palette LUT).
  *
- * Everything here is plain data except the framebuffer pointer, so a save state can copy the
- * struct alongside the VM arena. Per-image state lives in the arena (see graphics.c).
+ * Everything here is plain data except the framebuffer pointer. Save states (state.c) store
+ * the fields field by field; when adding one, decide there whether it is saved or derived.
+ * Per-image state lives in the arena (see graphics.c).
  */
 #ifndef EXEN_PLATFORM_H
 #define EXEN_PLATFORM_H
@@ -44,6 +45,8 @@ struct ExenPlatform {
 };
 
 int plat_class(ExenVM *vm, int which);
+/* The VM clock in ms (Gamelet.getTimerTickCount): the host's clock plus vm->clock_offset. */
+uint32_t exen_vm_ticks(ExenVM *vm);
 /* Log `msg` the first time `bit` is used. */
 void plat_warn_once(ExenVM *vm, int bit, const char *fmt, ...);
 

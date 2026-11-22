@@ -43,6 +43,10 @@ typedef struct ExenHost {
     void (*melody_stop)(void *user);
     /* Diagnostic text from the VM (Debug natives, warnings). */
     void (*log)(void *user, const char *msg);
+    /* Optional: the EEPROM image (exen_eeprom) changed. Called after Gamelet.saveCtx and after
+     * exen_state_load / exen_eeprom_reset. A frontend that persists the EEPROM writes it out
+     * here, as the original writes flash/EEPROM.DAT after every change. */
+    void (*eeprom_changed)(void *user);
 } ExenHost;
 
 typedef struct ExenConfig {
@@ -105,8 +109,44 @@ int exen_audio_active(ExenVM *vm);
 void exen_audio_set_volume(ExenVM *vm, int volume);
 int exen_audio_rate(ExenVM *vm);
 
-/* Persistent storage (the 2048-byte EEPROM image the original keeps in flash/eeprom.dat). */
+/* Persistent storage: the 2048-byte EEPROM image the original keeps in flash/eeprom.dat
+ * (layout in docs/re/NATIVES.md §3.1). The config area (network settings, nickname, currency,
+ * SMS prices) is read by the Gamelet/Sms natives; each installed game has a record in the
+ * gamelet table whose 300-byte context Gamelet.saveCtx/loadCtx write and read. The image starts
+ * out all zeros. A frontend that persists it loads the game's saved image into exen_eeprom()
+ * after exen_load_game, or, for a game without one, calls exen_eeprom_reset; it writes the
+ * image out from ExenHost.eeprom_changed and on exit. */
+#define EXEN_EEPROM_SIZE 2048
 uint8_t *exen_eeprom(ExenVM *vm);
+/* Fresh EEPROM for the loaded game: the config area (bytes 0..0x21b) is copied from `defaults`
+ * (the simulator's flash/eeprom.dat; NULL or short = zeros), and the gamelet table is replaced
+ * by a single record for this game with an empty context, as the simulator installs a game
+ * opened with File/Open. Calls ExenHost.eeprom_changed. */
+void exen_eeprom_reset(ExenVM *vm, const uint8_t *defaults, size_t len);
+
+/* Save states.
+ *
+ * A state captures everything the game can observe: the VM arena (heap and class statics), the
+ * allocator, the operand stack contents, the math PRNG, the display, the timer, the melody
+ * sequencer and synthesizer, the EEPROM and any queued SMS report, plus the VM's clock
+ * (getTimerTickCount). It can only be taken between host calls (never from inside a callback),
+ * when the interpreter has no live frames. Loading a state into a VM with the same framework
+ * and game loaded (right after exen_load_game, with or without exen_boot) makes it continue
+ * exactly as the saved VM would have: same frames, same audio. The format is a versioned,
+ * little-endian, compressed container (src/core/state.c); a state for another game or
+ * framework, or a damaged one, is refused with an error and leaves the VM unchanged.
+ *
+ * exen_state_size gives the exact size exen_state_save needs for the current state (0 if no
+ * state can be taken now). exen_state_save returns the number of bytes written, or < 0 if
+ * `cap` is too small or no state can be taken. exen_state_load returns 0 or < 0; bytes after
+ * the state (len larger than the state) are ignored, so a frontend may append its own data.
+ * On load the core restores its clock (getTimerTickCount continues from the saved value,
+ * whatever the host's ticks_ms returns), calls set_timer with the restored period, present
+ * with the restored screen, and eeprom_changed. Host settings are kept: audio volume, and the
+ * output rate (sequencer timing is converted if the rate differs). */
+size_t exen_state_size(ExenVM *vm);
+int exen_state_save(ExenVM *vm, void *buf, size_t cap);
+int exen_state_load(ExenVM *vm, const void *buf, size_t len);
 
 /* Diagnostics: number of calls made to each native index so far. */
 uint32_t exen_native_calls(ExenVM *vm, int index, const char **name);

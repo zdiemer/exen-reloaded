@@ -746,25 +746,81 @@ the core-side caller and the simulator behaviour.
 | `EXManufUIEditBox(titleID, maxSize, buf)` | 0x4364c3 | 0x403d8a (Gamelet.setNickName, Catalog.doEditBox) | Modal text entry. **Busy PeekMessage loop.** | H |
 | backlight `(mode)` | 0x4340d0 | 0x403c30 (init, from EEPROM `cfg+0x15d`), WndProc keydown | Mode 2 = always on, 1 = auto (on at key press, dims after 30 s), 0 = off. Brightness is a float `0x45c7c0` in [0.7, 1.0], stepped by 0.05 per idle call, each step forcing a repaint. | H |
 
-### 3.1 EEPROM [M]
+### 3.1 EEPROM [H]
 
-- The EEPROM is a 2048-byte image of a config struct, kept in RAM at `[0x45fe8c]` and mirrored to
-  `flash\EEPROM.DAT`. It holds:
-  - the network and operator config (phone numbers, "oper3", "bopr3", "Xcell")
-  - the SMS server number
-  - currency ("Euro(s)") and price table (`+0x1a8`, 28-byte entries)
-  - settings bytes: `+0x15c` sound/volume, `+0x15d` backlight mode, `+0x15e` vibrator enabled,
-    `+0x15f` ...
-  - the installed-gamelet table (names such as "CrazyCobra" at 0x24c in the shipped file), and per-game
-    context slots
-- Writes go through `0x402d7f`, which first serialises the struct via `0x402e4d`.
-- `Gamelet.saveCtx(byte[])` (`0x425156` → `0x4153f8`) copies **min(len, 300)** bytes into the
-  current gamelet's record (`[[ctx+0x14]+4] + 0x1c + 0x20`). `loadCtx` (`0x41547b`) copies them back.
-  Neither does anything if the gamelet has no record (`+0xc == -1`).
-- The flush to EEPROM.DAT happens later, through the core (`exOnSaveCtx` path, flag at record `+0x1d4`
-  bit 0, `0x414e31`).
-- **Per-game persistent storage is therefore 300 bytes**, not 2048. The 2048 bytes is the whole
-  phone-side EEPROM.
+The EEPROM is a 2048-byte image of the simulator's config struct, kept in RAM at `[0x45fe8c]` and
+mirrored to `flash\EEPROM.DAT`. It is read at start (`0x402d43`: EXManufEepromRead, then the
+deserialiser `0x402e00`) and written after every change (`0x402d7f`, 12 call sites: serialise
+with `0x402e4d`, then EXManufEepromWrite of all 2048 bytes). The serialiser only scrambles bytes
+4..0x7ff (`0x414d53`, key from `0x414da0`) when the first u32 is nonzero; the shipped image has
+0 there, so **the file is the struct verbatim**. Re-read from the disassembly in 2026-11 (issue
+#17); the table code was traced through `0x415580`..`0x415899`, the File/Open install path
+`0x417009`..`0x4173d4` and the launch path `0x403b3e`.
+
+Config area (`cfg` = the image):
+
+| Offset | Contents (shipped value) |
+|---|---|
+| `+0x00` u32 | serialisation flag (0 = plain) |
+| `+0x04..+0x07` | version bytes for getVersionInfo (`00 85 00 80`) |
+| `+0x08` | phone number string, 0xff-terminated |
+| `+0x1e..+0x21` | registration bytes (isUserRegistred) |
+| `+0x25`, `+0x46` | operator strings ("Joper3", "bopr3"; +0x24 holds 0x0a) |
+| `+0x66` | nickname, 16 bytes ("Xcell") |
+| `+0x78`..`+0x7f` | small values (0x35, 0x0c, 0x05) |
+| `+0x80` | "Begin News" |
+| `+0x14c` | "Fusio" |
+| `+0x15c` / `+0x15d` / `+0x15e` | sound, backlight mode, vibrator |
+| `+0x160` / `+0x162` | home network MCC / MNC |
+| `+0x164` u16 | SMS header field |
+| `+0x168` | currency ("Euro(s)"), 0xff-terminated |
+| `+0x190` | SMS price table: 28-byte entries, a 0x15-byte number string, the 16.16 price at +0x18 |
+| `+0x21c` u16 | number of records in the gamelet table |
+| `+0x21e` u16 | cleared when a gamelet is removed (`0x41585a`) |
+| `+0x224` | the gamelet table |
+
+**Gamelet table.** Records follow each other from `+0x224`; each starts with a 0x1c-byte header:
+
+| Record offset | Contents (shipped CrazyCobra record at 0x224) |
+|---|---|
+| `+0x00` u32 | 0 |
+| `+0x04` u32 | `[download+4]`, apparently the file size (0x18760) |
+| `+0x08` u32 | record size: 0x1c, plus 0x244 when the gamelet has an id (0x260) |
+| `+0x0c` u32 | gamelet id, the signed 16-bit download id; -1 = no gamelet (0x80) |
+| `+0x10` u32 | 0 |
+| `+0x14` u32 | 2 (`0x403be9(rec, 0)`), 1 for the other install path |
+| `+0x18` u32 | 1; the remover `0x4157e1` drops records with an id and a nonzero `+0x18` |
+| `+0x24` u32 | `0x423c1f()`: a hash of the 30-byte time string from `0x403eef` |
+| `+0x28` | gamelet name, 0xff-terminated ("CrazyCobra") |
+| `+0x3c` | **the 300-byte context** (`saveCtx` / `loadCtx`) |
+| `+0x168` | passed to the record's save callback (vtable `+0x1c`) when flag bit 0 is set |
+| `+0x1f0` u16 | flags; bit 0 = context to flush (`0x414e31`) |
+| `+0x1fc` | description ("This gamelet has been downloaded via FileOpen from the simulator.") |
+
+`0x415668(id)` finds a record by id; `0x4156c9` installs one (copying over an existing record with
+the same id, else appending and incrementing the count); `0x415742` removes one and moves the rest
+down. A game opened with File/Open gets a freshly built record (body zeroed, so **the context
+starts empty and a reinstall clears it**), is installed, and becomes the current record:
+`[[0x45ff3c]+0x14]+4` points straight into the image (`0x4173c2`; the launcher sets it the same
+way through `0x415668` at `0x403b4c`). Where the id of a File/Open install comes from was not
+traced to the end (the download session, `[[0x45ff3c]+0x18]+0x14`, `0x401933`); the shipped
+record has 0x80, which is also the u32 at `.exn +0x04` in every known game.
+
+- `Gamelet.saveCtx(byte[])` (`0x425156` -> `0x4153f8`) copies **min(len, 300)** bytes into the
+  current record at `+0x3c`; `loadCtx` (`0x41547b`) copies them back. Neither does anything if
+  the current record's id is -1. The flush to EEPROM.DAT happens later, through the record's
+  callbacks.
+- **Per-game persistent storage is therefore 300 bytes**, not 2048.
+
+**Port.** The core keeps the image (`exen_eeprom`) and uses the same layout: saveCtx/loadCtx
+find the current game's record by id (the signed u16 at `.exn +0x04`, 0x80 in practice) and use
+its `+0x3c`. Deviation: with no record (a blank image), loadCtx leaves the array alone, as the
+original, but saveCtx appends a record first, so that games keep their saves without a
+File/Open step. `exen_eeprom_reset(defaults)` builds a fresh image the way File/Open does: the
+config area `0..0x21b` from the simulator's `flash/eeprom.dat`, and a table holding one record for
+the game (size 0x260, id, name = database title, `+0x04` = file size, `+0x24` = file CRC-32 instead
+of a time hash, empty context). The frontends persist the image per game and write it on
+`ExenHost.eeprom_changed` (after every saveCtx) and on exit.
 
 ### 3.2 Melody playback (`0x43b192`, timer proc `0x43ad57`) [H]
 
@@ -1095,8 +1151,8 @@ records at `0x4c65a8`:
   corpus and should be next.
 - Paint modes: both analyses find `setPaintMode` to be a stub in both op tables, so PM_* would have no
   visible effect. Confirm by running a game that uses PM_XOR.
-- Exact EEPROM struct layout and the serialisation in `0x402e4d`; the gamelet-record format (context
-  at `+0x3c`, 300 bytes).
+- The EEPROM scrambler `0x414d53` (only used when the image's first u32 is nonzero), the source
+  of a File/Open gamelet id, and the record bytes `+0x168..+0x1fb`.
 - How the core heap is split from the VM heap (`0x404224`), and whether `*_BLOCKS_*` is ever used.
 - Method-hash function for 4CVP methods (not needed for binding).
 - `0x407aae` / `0x410f92` run-time native linking: is it ever reachable (createTempClass always fails)?

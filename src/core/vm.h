@@ -156,9 +156,16 @@ struct ExenVM {
         int delivering;     /* api.c is running a queued delivery */
     } ext;
 
+    /* The VM clock (Gamelet.getTimerTickCount) is host.ticks_ms() + clock_offset; a state load
+     * sets the offset so that the clock continues from the saved value (state.c). */
+    uint32_t clock_offset;
+
     /* the loaded game */
     uint8_t *exn;
     size_t exn_len;
+    uint32_t exn_crc;       /* CRC-32 of the .exn file */
+    uint32_t code_crc;      /* CRC-32 of the arena's class blocks [0, code_end) as loaded */
+    int error_after_halt;   /* error was set by a state call on a halted VM: report it */
     char main_class[33];
     char error[256];
 };

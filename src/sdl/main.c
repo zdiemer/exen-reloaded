@@ -1,7 +1,8 @@
 /* exen-reloaded SDL3 frontend.
  *
  *   exen-reloaded [--sim gensimu.exe] [--scale N] [--size WxH] [--fullscreen]
- *                 [--mute] [--volume N] game.exn
+ *                 [--mute] [--volume N] [--keys-config PATH] game.exn
+ *   exen-reloaded [--keys-config PATH] --print-bindings
  *
  * Pacing is event driven: the thread sleeps in SDL_WaitEventTimeout until the next game tick
  * or input arrives. The original simulator busy-waits in its menus and repaints through slow
@@ -23,6 +24,9 @@
 #include <string.h>
 
 #include "exen.h"
+#include "input.h"
+#include "paths.h"
+#include "persist.h"
 
 typedef struct {
     SDL_Window *win;
@@ -66,10 +70,11 @@ static void set_title(App *a, const char *name, ExenVM *vm)
 {
     char t[512];
     const char *m = a->muted ? " [muted]" : "";
+    const char *st = persist_title(); /* save state slot status (persist.c) */
     if (exen_halted(vm))
-        SDL_snprintf(t, sizeof t, "%s - stopped: %s%s", name, exen_error(vm), m);
+        SDL_snprintf(t, sizeof t, "%s - stopped: %s%s%s", name, exen_error(vm), m, st);
     else
-        SDL_snprintf(t, sizeof t, "%s - exen-reloaded%s", name, m);
+        SDL_snprintf(t, sizeof t, "%s - exen-reloaded%s%s", name, m, st);
     SDL_SetWindowTitle(a->win, t);
 }
 
@@ -113,33 +118,22 @@ static void on_log(void *u, const char *m)
     SDL_Log("%s", m);
 }
 
-/* PC key -> phone key code, following the original simulator (docs/re/NATIVES.md §4.2). */
-static int map_key(SDL_Keycode k)
+/* Phone key transitions from the controls (input.c). */
+static void on_phone_key(void *u, int code, int pressed)
 {
-    switch (k) {
-    case SDLK_RETURN: case SDLK_KP_ENTER: return EXEN_KEY_OK;
-    case SDLK_ESCAPE: case SDLK_BACKSPACE: return EXEN_KEY_CLEAR;
-    case SDLK_UP: return '2';
-    case SDLK_LEFT: return '4';
-    case SDLK_RIGHT: return '6';
-    case SDLK_DOWN: return '8';
-    case SDLK_KP_0: return '0';
-    case SDLK_KP_7: return '1';
-    case SDLK_KP_8: return '2';
-    case SDLK_KP_9: return '3';
-    case SDLK_KP_4: return '4';
-    case SDLK_KP_5: return '5';
-    case SDLK_KP_6: return '6';
-    case SDLK_KP_1: return '7';
-    case SDLK_KP_2: return '8';
-    case SDLK_KP_3: return '9';
-    case SDLK_KP_MULTIPLY: return '*';
-    case SDLK_KP_DIVIDE: return '#';
-    default:
-        if (k >= SDLK_0 && k <= SDLK_9)
-            return (int)('0' + (k - SDLK_0));
-        return 0;
-    }
+    ExenVM *vm = u;
+    if (!exen_halted(vm))
+        exen_key(vm, code, pressed);
+}
+
+/* --keys-config, else keys.ini in the data directory. */
+static const char *controls_path(const char *given)
+{
+    static char buf[1024];
+    if (given)
+        return given;
+    SDL_snprintf(buf, sizeof buf, "%skeys.ini", exen_data_dir());
+    return buf;
 }
 
 static void *slurp(const char *path, size_t *len)
@@ -175,14 +169,26 @@ static void usage(void)
             "  --fullscreen    start fullscreen (F11 toggles)\n"
             "  --mute          start with the sound off (M toggles)\n"
             "  --volume N      sound volume 0-100 (default 100)\n"
-            "keys: arrows = 2/4/6/8, numpad = phone keypad, 0-9, Enter = select, Esc/Backspace = clear,\n"
-            "      M = mute, F11 = fullscreen\n");
+            "  --keys-config PATH\n"
+            "                  controls file (default: keys.ini beside the app, or in the user\n"
+            "                  data directory if that is not writable; written with the defaults)\n"
+            "  --print-bindings\n"
+            "                  print the effective controls and exit\n"
+            "default controls (remap them in the controls file; see README.md):\n"
+            "  keyboard: arrows or W/A/S/D = 2/4/6/8, Q/E/Z/C = 1/3/7/9, Space = 5, X = 0,\n"
+            "            [ = *, ] = #, digits and numpad = phone keypad (numpad 7 = 1),\n"
+            "            Enter = OK/select, Esc/Backspace = clear/back\n"
+            "  gamepad:  d-pad/left stick = 2/4/6/8, A = 5, B/Back = clear, Start = OK,\n"
+            "            X = *, Y = #, LB/RB = 1/3, LT/RT = 7/9, stick clicks = 0\n"
+            "  hotkeys:  M = mute, F11 = fullscreen,\n"
+            "            F5 = save state, F8 = load state, F6/F7 = previous/next slot (0-9)\n");
 }
 
 int main(int argc, char **argv)
 {
     const char *sim = NULL, *game = NULL;
-    int scale = 4, w = 0, h = 0, fullscreen = 0, mute = 0, volume = 100;
+    const char *keys_config = NULL;
+    int scale = 4, w = 0, h = 0, fullscreen = 0, mute = 0, volume = 100, print_bindings = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--sim") && i + 1 < argc) sim = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
@@ -190,8 +196,20 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
         else if (!strcmp(argv[i], "--mute")) mute = 1;
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc) volume = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--keys-config") && i + 1 < argc) keys_config = argv[++i];
+        else if (!strcmp(argv[i], "--print-bindings")) print_bindings = 1;
         else if (argv[i][0] == '-') { usage(); return 2; }
         else game = argv[i];
+    }
+    if (print_bindings) {
+        Input in;
+        input_init(&in, NULL, NULL);
+        const char *path = controls_path(keys_config);
+        int loaded = input_load_or_create(&in, path, 0);
+        char *text = input_format_config(&in, 0);
+        printf("; %s %s\n%s", loaded ? "controls from" : "built-in controls; no", path, text ? text : "");
+        SDL_free(text);
+        return 0;
     }
     if (!game || w < 0 || h < 0 || scale <= 0 || volume < 0 || volume > 100) {
         usage();
@@ -255,21 +273,33 @@ int main(int argc, char **argv)
     cfg.screen_width = w;
     cfg.screen_height = h;
     cfg.audio_rate = AUDIO_RATE;
-    cfg.host = (ExenHost){&a, on_present, on_timer, on_ticks, NULL, NULL, on_log};
+    cfg.host = (ExenHost){
+        .user = &a,
+        .present = on_present,
+        .set_timer = on_timer,
+        .ticks_ms = on_ticks,
+        .log = on_log,
+        .eeprom_changed = persist_eeprom_changed,
+    };
     a.start_ns = SDL_GetTicksNS();
     ExenVM *vm = exen_create(&cfg);
     if (!vm || exen_load_framework(vm, simb, sl) < 0 || exen_load_game(vm, gameb, gl) < 0 ||
-        exen_boot(vm) < 0) {
+        (persist_open(vm, sim, gameb, gl), exen_boot(vm) < 0)) {
         char msg[512];
         SDL_snprintf(msg, sizeof msg, "Failed to start %s:\n%s", name, vm ? exen_error(vm) : "out of memory");
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "exen-reloaded", msg, a.win);
         return 1;
     }
     exen_audio_set_volume(vm, a.muted ? 0 : a.volume);
+    /* controls (input.c); gamepads arrive as SDL_EVENT_GAMEPAD_ADDED */
+    Input controls;
+    input_init(&controls, on_phone_key, vm);
+    input_load_or_create(&controls, controls_path(keys_config), 1);
+    input_open_gamepads(&controls);
     if (a.muted)
         set_title(&a, name, vm);
 
-    int running = 1, halted_shown = 0, audio_wait = audio_pump(&a, vm);
+    int running = 1, halted_shown = 0, hk, audio_wait = audio_pump(&a, vm);
     a.dirty = 1;
     while (running) {
         /* sleep until the next tick or an event */
@@ -280,6 +310,11 @@ int main(int argc, char **argv)
         }
         if (audio_wait >= 0 && (timeout < 0 || audio_wait < timeout))
             timeout = audio_wait;
+        int status_wait = persist_title_wait_ms(); /* the slot status in the title expires */
+        if (status_wait == 0)
+            set_title(&a, name, vm);
+        else if (status_wait > 0 && (timeout < 0 || status_wait < timeout))
+            timeout = status_wait;
         SDL_Event ev;
         if (SDL_WaitEventTimeout(&ev, timeout)) {
             do {
@@ -298,14 +333,25 @@ int main(int argc, char **argv)
                             exen_audio_set_volume(vm, a.muted ? 0 : a.volume);
                             set_title(&a, name, vm);
                         }
-                    } else if (!ev.key.repeat) { /* the original drops auto-repeat */
-                        int code = map_key(ev.key.key);
-                        if (code && !exen_halted(vm))
-                            exen_key(vm, code, ev.type == SDL_EVENT_KEY_DOWN);
+                    } else if ((hk = persist_hotkey(&ev)) != PERSIST_NONE) { /* F5-F8 */
+                        if (hk == PERSIST_LOADING) {
+                            input_release_all(&controls); /* into the old state */
+                            if (persist_load_slot()) {
+                                if (a.audio)
+                                    SDL_ClearAudioStream(a.audio);
+                                halted_shown = 0;
+                            }
+                        }
+                        set_title(&a, name, vm);
+                    } else {
+                        input_handle_event(&controls, &ev);
                     }
                     break;
                 case SDL_EVENT_WINDOW_EXPOSED:
                     a.dirty = 1;
+                    break;
+                default: /* gamepads, focus loss */
+                    input_handle_event(&controls, &ev);
                     break;
                 }
             } while (SDL_PollEvent(&ev));
@@ -334,8 +380,10 @@ int main(int argc, char **argv)
             SDL_RenderPresent(a.ren);
         }
     }
+    input_close_gamepads(&controls);
     if (a.audio)
         SDL_DestroyAudioStream(a.audio);
+    persist_close();
     exen_destroy(vm);
     SDL_free(simb);
     SDL_free(gameb);
