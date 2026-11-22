@@ -11,7 +11,8 @@ program that busy-waits (it keeps a CPU core near 100% while sitting in a menu),
 at a crawl, and crashes on others. exen-reloaded is a from-scratch, portable reimplementation of
 the ExEn virtual machine and platform, built to replace it.
 
-> **Status: early.** The repository holds the reverse-engineering groundwork. Nothing runs games yet.
+> **Status: early.** The VM boots real games headlessly; graphics and the SDL3 frontend are in
+> progress. Progress is tracked in [issues](../../issues) and [milestones](../../milestones).
 
 ## Goals
 
