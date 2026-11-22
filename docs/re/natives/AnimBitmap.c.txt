@@ -20,10 +20,10 @@
  *   dst+0x18..0x24 and calls dst->ops->setPaintMode((s16)g.curPaintMode).
  * blit(dst, dx, dy, w, h, src, sx, sy, w, h, mode, transform) = 0x418008. `mode` goes to
  *   src->ops+0x30, `transform` (Sprite.TRANSFORM_*, 4/5 = rotate 270/90 swap w/h) to ops+0x34.
- *   NOTE (conf medium): in both stock vtables ops+0x30 is a stub (1-bit 0x42baf3 returns 1; 8-bit
- *   0x42c351 calls accelerator hook *(0x457f38) = 0x42d463 which returns 1), so the `mode` codes
- *   below may have no visible effect in gensimu; transparency then comes from the source image's
- *   own transparent colour inside the row copier (ops+0x38). Needs confirming in the Graphics work.
+ *   CONFIRMED (conf high): 0x418008 hands `mode` only to the source's ops+0x30 (0x418154), which
+ *   is a stub in both stock vtables (1-bit 0x42baf3 returns 1; 8-bit 0x42c351 calls accelerator
+ *   hook *(0x457f38) = 0x42d463 which returns 1). The `mode` codes below have no effect; the mask
+ *   and the image both go through the source's blit mode (graphics_drawImage.c.txt).
  */
 
 /* frame_index(ab, f) = 0x424580 (also native 45 getRealFrame(I)I @0x42467b)   conf high */
@@ -49,7 +49,7 @@ void frame_rect(AnimBitmap *ab, int f, int out[4]) {
         int iw = (s16)ab->image->width;                        /* Image.width, +0x18 */
         if (!iw || !(s16)ab->width) { log("exen_Animation_draw, Param nl=0, ..."); return; }
         if (ab->state & 1) iw >>= 1;                           /* WITHMASK: right half is the mask */
-        int cols = iw / (s16)ab->width;
+        s16 cols = iw / (s16)ab->width;     /* stored as a word; 0 (frame wider than image) -> #DE below */
         out[0] = (f % cols) * (s16)ab->width;  out[1] = (f / cols) * (s16)ab->height;
         out[2] = (s16)ab->width;               out[3] = (s16)ab->height;
     } else {

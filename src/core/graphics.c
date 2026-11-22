@@ -60,6 +60,8 @@ enum { R_START, R_LEN, R_OFFSET, R_ID, R_ARRAY };
 static const uint32_t class_hash[PC_COUNT] = {
     [PC_GRAPHICS] = 0xc6ed8e2au, [PC_IMAGE] = 0x23c5e7e8u, [PC_PALETTE] = 0x5562ca3bu,
     [PC_RESOURCE] = 0xbab5c664u, [PC_TEXTUREMAP] = 0x3834a617u, [PC_GAMELET] = 0xe127b0e1u,
+    [PC_ANIMBITMAP] = 0xe7167d52u, [PC_PLAYFIELD] = 0x7219d0b4u, [PC_SPRITE] = 0x60fe5152u,
+    [PC_ANIMFLASH] = 0xd414954au,
 };
 
 int plat_class(ExenVM *vm, int which)
@@ -771,8 +773,8 @@ static void draw_glyph(ExenVM *vm, EXimg *e, uint8_t *d, uint32_t len, int32_t x
     }
 }
 
-static void draw_text(ExenVM *vm, EXimg *e, int32_t x, int32_t y, const uint8_t *s, int32_t len,
-                      uint8_t c)
+void eximg_draw_text(ExenVM *vm, EXimg *e, int32_t x, int32_t y, const uint8_t *s, int32_t len,
+                     uint8_t c)
 {
     if (!s || !vm->plat->have_font)
         return;
@@ -885,7 +887,7 @@ static int n_drawChars(ExenVM *vm, uint32_t *a)
     if (!tmp)
         return 0;
     memcpy(tmp, src, (size_t)len);
-    draw_text(vm, &e, ARG(4), ARG(5), tmp, len, cur_color(vm, a[0]));
+    eximg_draw_text(vm, &e, ARG(4), ARG(5), tmp, len, cur_color(vm, a[0]));
     if (tmp != buf)
         free(tmp);
     return 0;
@@ -1261,7 +1263,7 @@ static void decode_png(ExenVM *vm, EXimg *e, const uint8_t *png, size_t len, int
     free(buf);
     if (rc == EXEN_CODEC_ERR_UNSUPPORTED && im.color_type == 2) {
         static const uint8_t msg[] = "True color PNG not supported";
-        draw_text(vm, e, 0, 0, msg, 23, 0);
+        eximg_draw_text(vm, e, 0, 0, msg, 23, 0);
         plat_warn_once(vm, W_TRUECOLOR, "image decode: truecolour PNG not supported");
         return;
     }

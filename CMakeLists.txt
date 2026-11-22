@@ -21,6 +21,7 @@ add_library(exen_core STATIC
   src/core/loader.c
   src/core/natives.c
   src/core/platform.c
+  src/core/playfield.c
   src/core/resource.c
 )
 target_include_directories(exen_core PUBLIC src/core)
