@@ -201,6 +201,12 @@ static void lut_prime(ExenVM *vm, const EXimg *e)
     }
 }
 
+const uint8_t *eximg_lut(ExenVM *vm, const EXimg *e)
+{
+    lut_prime(vm, e);
+    return vm->plat->lut;
+}
+
 /* setBlitMode (0x41a2a0 / 0x418f00): the mode is kept in the high nibble. */
 static void set_blit_mode(EXimg *e, uint32_t mode) { e->blitMode = mode & 0xf0; }
 

@@ -1,10 +1,17 @@
 /* exen-reloaded SDL3 frontend.
  *
- *   exen-reloaded [--sim gensimu.exe] [--scale N] [--size WxH] [--fullscreen] game.exn
+ *   exen-reloaded [--sim gensimu.exe] [--scale N] [--size WxH] [--fullscreen]
+ *                 [--mute] [--volume N] game.exn
  *
  * Pacing is event driven: the thread sleeps in SDL_WaitEventTimeout until the next game tick
  * or input arrives. The original simulator busy-waits in its menus and repaints through slow
  * per-pixel float conversion; nothing here spins.
+ *
+ * Audio: the core renders the melodies (exen_audio_render). This thread pushes the PCM into an
+ * SDL audio stream right after the events that start them, and keeps AUDIO_TARGET_MS queued
+ * while a melody plays, waking when the queue falls to AUDIO_LOW_MS. The core therefore stays
+ * single-threaded (no lock, no audio callback). When nothing plays, nothing is rendered and
+ * the loop does not wake for audio.
  *
  * Like the original, a tick that runs late is not repeated: missed ticks are dropped rather
  * than queued, so a slow frame slows the game instead of causing a burst of catch-up ticks.
@@ -28,7 +35,43 @@ typedef struct {
     uint64_t next_tick_ns;
     uint64_t start_ns;
     uint32_t lut[256];      /* RGB332 -> XRGB8888 as the original display path computes it */
+    SDL_AudioStream *audio; /* NULL: no audio device */
+    int volume, muted;
 } App;
+
+#define AUDIO_RATE 48000
+#define AUDIO_TARGET_MS 60
+#define AUDIO_LOW_MS 30
+
+/* Top the audio stream up while the core has something to play. Returns the ms until the
+ * queue falls to the low-water mark, or -1 if there is nothing to wait for. */
+static int audio_pump(App *a, ExenVM *vm)
+{
+    if (!a->audio || !exen_audio_active(vm))
+        return -1;
+    int queued = SDL_GetAudioStreamQueued(a->audio) / 4;
+    int target = AUDIO_RATE * AUDIO_TARGET_MS / 1000;
+    int16_t buf[2 * 1024];
+    while (queued < target) {
+        int n = target - queued > 1024 ? 1024 : target - queued;
+        exen_audio_render(vm, buf, n);
+        SDL_PutAudioStreamData(a->audio, buf, n * 4);
+        queued += n;
+    }
+    int ms = (queued - AUDIO_RATE * AUDIO_LOW_MS / 1000) * 1000 / AUDIO_RATE;
+    return ms > 1 ? ms : 1;
+}
+
+static void set_title(App *a, const char *name, ExenVM *vm)
+{
+    char t[512];
+    const char *m = a->muted ? " [muted]" : "";
+    if (exen_halted(vm))
+        SDL_snprintf(t, sizeof t, "%s - stopped: %s%s", name, exen_error(vm), m);
+    else
+        SDL_snprintf(t, sizeof t, "%s - exen-reloaded%s", name, m);
+    SDL_SetWindowTitle(a->win, t);
+}
 
 static void build_lut(App *a)
 {
@@ -129,22 +172,27 @@ static void usage(void)
             "  --scale N       window scale (default 4)\n"
             "  --size WxH      screen size of the target handset (default 101x80)\n"
             "  --fullscreen    start fullscreen (F11 toggles)\n"
-            "keys: arrows = 2/4/6/8, numpad = phone keypad, 0-9, Enter = select, Esc/Backspace = clear\n");
+            "  --mute          start with the sound off (M toggles)\n"
+            "  --volume N      sound volume 0-100 (default 100)\n"
+            "keys: arrows = 2/4/6/8, numpad = phone keypad, 0-9, Enter = select, Esc/Backspace = clear,\n"
+            "      M = mute, F11 = fullscreen\n");
 }
 
 int main(int argc, char **argv)
 {
     const char *sim = NULL, *game = NULL;
-    int scale = 4, w = 101, h = 80, fullscreen = 0;
+    int scale = 4, w = 101, h = 80, fullscreen = 0, mute = 0, volume = 100;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--sim") && i + 1 < argc) sim = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--size") && i + 1 < argc) sscanf(argv[++i], "%dx%d", &w, &h);
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
+        else if (!strcmp(argv[i], "--mute")) mute = 1;
+        else if (!strcmp(argv[i], "--volume") && i + 1 < argc) volume = atoi(argv[++i]);
         else if (argv[i][0] == '-') { usage(); return 2; }
         else game = argv[i];
     }
-    if (!game || w <= 0 || h <= 0 || scale <= 0) {
+    if (!game || w <= 0 || h <= 0 || scale <= 0 || volume < 0 || volume > 100) {
         usage();
         return 2;
     }
@@ -165,6 +213,8 @@ int main(int argc, char **argv)
     a.w = w;
     a.h = h;
     a.period_ms = -1;
+    a.volume = volume;
+    a.muted = mute;
     a.rgb = calloc((size_t)w * (size_t)h, sizeof *a.rgb);
     build_lut(&a);
     for (int i = 0; i < w * h; i++)
@@ -184,9 +234,20 @@ int main(int argc, char **argv)
     a.tex = SDL_CreateTexture(a.ren, SDL_PIXELFORMAT_XRGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
     SDL_SetTextureScaleMode(a.tex, SDL_SCALEMODE_NEAREST);
 
+    /* Audio is optional: without a device the game runs silently. */
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        SDL_AudioSpec spec = {SDL_AUDIO_S16, 2, AUDIO_RATE};
+        a.audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+        if (a.audio)
+            SDL_ResumeAudioStreamDevice(a.audio);
+    }
+    if (!a.audio)
+        SDL_Log("audio disabled: %s", SDL_GetError());
+
     ExenConfig cfg = {0};
     cfg.screen_width = w;
     cfg.screen_height = h;
+    cfg.audio_rate = AUDIO_RATE;
     cfg.host = (ExenHost){&a, on_present, on_timer, on_ticks, NULL, NULL, on_log};
     a.start_ns = SDL_GetTicksNS();
     ExenVM *vm = exen_create(&cfg);
@@ -197,8 +258,11 @@ int main(int argc, char **argv)
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "exen-reloaded", msg, a.win);
         return 1;
     }
+    exen_audio_set_volume(vm, a.muted ? 0 : a.volume);
+    if (a.muted)
+        set_title(&a, name, vm);
 
-    int running = 1, halted_shown = 0;
+    int running = 1, halted_shown = 0, audio_wait = audio_pump(&a, vm);
     a.dirty = 1;
     while (running) {
         /* sleep until the next tick or an event */
@@ -207,6 +271,8 @@ int main(int argc, char **argv)
             uint64_t now = SDL_GetTicksNS();
             timeout = a.next_tick_ns > now ? (int)((a.next_tick_ns - now + 999999u) / 1000000u) : 0;
         }
+        if (audio_wait >= 0 && (timeout < 0 || audio_wait < timeout))
+            timeout = audio_wait;
         SDL_Event ev;
         if (SDL_WaitEventTimeout(&ev, timeout)) {
             do {
@@ -219,6 +285,12 @@ int main(int argc, char **argv)
                     if (ev.key.key == SDLK_F11 && ev.type == SDL_EVENT_KEY_DOWN) {
                         fullscreen = !fullscreen;
                         SDL_SetWindowFullscreen(a.win, fullscreen);
+                    } else if (ev.key.key == SDLK_M) {
+                        if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
+                            a.muted = !a.muted;
+                            exen_audio_set_volume(vm, a.muted ? 0 : a.volume);
+                            set_title(&a, name, vm);
+                        }
                     } else if (!ev.key.repeat) { /* the original drops auto-repeat */
                         int code = map_key(ev.key.key);
                         if (code && !exen_halted(vm))
@@ -241,11 +313,10 @@ int main(int argc, char **argv)
                     a.next_tick_ns = now + period;
             }
         }
+        audio_wait = audio_pump(&a, vm);
         if (exen_halted(vm) && !halted_shown) {
             halted_shown = 1;
-            char t[512];
-            SDL_snprintf(t, sizeof t, "%s - stopped: %s", name, exen_error(vm));
-            SDL_SetWindowTitle(a.win, t);
+            set_title(&a, name, vm);
         }
         if (a.dirty) {
             a.dirty = 0;
@@ -256,6 +327,8 @@ int main(int argc, char **argv)
             SDL_RenderPresent(a.ren);
         }
     }
+    if (a.audio)
+        SDL_DestroyAudioStream(a.audio);
     exen_destroy(vm);
     SDL_free(simb);
     SDL_free(gameb);

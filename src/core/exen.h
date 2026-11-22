@@ -36,7 +36,9 @@ typedef struct ExenHost {
     void (*set_timer)(void *user, int period_ms);
     /* Milliseconds since the game started. */
     uint32_t (*ticks_ms)(void *user);
-    /* Melody playback (data in the ExEn melody format, docs/re/NATIVES.md §3.2). */
+    /* Optional notifications: a melody started (data in the ExEn melody format,
+     * docs/re/NATIVES.md §3.2) or was stopped. The core renders the audio itself
+     * (exen_audio_render); these are for diagnostics. */
     void (*melody_play)(void *user, const uint8_t *data, int len);
     void (*melody_stop)(void *user);
     /* Diagnostic text from the VM (Debug natives, warnings). */
@@ -46,6 +48,7 @@ typedef struct ExenHost {
 typedef struct ExenConfig {
     int screen_width, screen_height; /* device profile; 0 = 101x80 */
     uint32_t heap_bytes;             /* 0 = default */
+    int audio_rate;                  /* output sample rate in Hz (8000..192000); 0 = 44100 */
     ExenHost host;
 } ExenConfig;
 
@@ -67,6 +70,21 @@ int exen_key(ExenVM *vm, int keycode, int pressed);
 
 /* Non-zero once the game has exited or the VM has stopped on a fatal error. */
 int exen_halted(ExenVM *vm);
+
+/* Audio. The core sequences and synthesizes the game's melodies (Gamelet.playMelody) and the
+ * host pulls the result as PCM: interleaved stereo int16 (left, right) at the configured rate.
+ * The sequencer runs on the audio clock, so the host renders in step with real time (or with
+ * its virtual clock): audio rendered after a tick or key event plays what that event started.
+ * exen_audio_render always fills `frames` frames (silence when idle) and returns `frames`.
+ * Like every other call it must not run concurrently with the rest of the API. */
+int exen_audio_render(ExenVM *vm, int16_t *out, int frames);
+/* Non-zero while a melody plays or a note is still fading out. When it is zero, the host may
+ * stop rendering until the next event; rendering then resumes where the game started. */
+int exen_audio_active(ExenVM *vm);
+/* Output volume 0..100 (default 100, 0 mutes); applied as a loudness (square-law) curve.
+ * Muting keeps the sequencer running, so melodies stay in time. */
+void exen_audio_set_volume(ExenVM *vm, int volume);
+int exen_audio_rate(ExenVM *vm);
 
 /* Persistent storage (the 2048-byte EEPROM image the original keeps in flash/eeprom.dat). */
 uint8_t *exen_eeprom(ExenVM *vm);

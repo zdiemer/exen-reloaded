@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "extnatives.h"
 #include "platform.h"
 
 enum { GL_GBUFF, GL_IMAGE }; /* exen.Gamelet instance slots */
@@ -27,12 +28,14 @@ int platform_init(ExenVM *vm, const ExenConfig *cfg)
         return -1;
     p->normal_video = 1;
     p->timer_ms = -1;
+    melody_init(&p->melody, cfg ? cfg->audio_rate : 0);
     for (int i = 0; i < PC_COUNT; i++)
         p->cls[i] = -2;
     graphics_register();
     resource_register();
     gamelet_register();
     playfield_register();
+    extnatives_register(); /* also Gamelet 78 sendSms, 84-85 nickname (sms.c) */
     return 0;
 }
 
@@ -53,12 +56,6 @@ void platform_set_font(ExenVM *vm, const uint8_t *bits)
 uint8_t *exen_eeprom(ExenVM *vm) { return vm->plat->eeprom; }
 
 /* ------------------------------------------------------------ Gamelet natives */
-
-static void melody_stop(ExenVM *vm)
-{
-    if (vm->host.melody_stop)
-        vm->host.melody_stop(vm->host.user);
-}
 
 static void timer_set(ExenVM *vm, int ms)
 {
@@ -147,17 +144,6 @@ static int n_startTimer(ExenVM *vm, uint32_t *a)
 
 static int n_stopTimer(ExenVM *vm, uint32_t *a) { (void)a; timer_set(vm, -1); return 0; }
 
-static int n_sendSms(ExenVM *vm, uint32_t *a)
-{
-    (void)a;
-    /* The simulator without a configured network stops the timer and the melody and ends the
-     * VM with exit state 3 (0x4250c7). We have no network. */
-    timer_set(vm, -1);
-    melody_stop(vm);
-    vm_halt(vm, "Gamelet.sendSms: no network (exit state 3)");
-    return 0;
-}
-
 static int n_saveCtx(ExenVM *vm, uint32_t *a)
 {
     if (!a[1]) {
@@ -188,28 +174,15 @@ static int n_playMelody(ExenVM *vm, uint32_t *a)
         vm_halt(vm, "Gamelet.playMelody: null array");
         return 0;
     }
-    /* The original only plays when the EEPROM sound setting is on; the host decides here. */
-    if (vm->host.melody_play)
-        vm->host.melody_play(vm->host.user, arr_data(vm, a[1]), arr_len(vm, a[1]));
+    /* The original only plays when the EEPROM sound byte (cfg+0x15c) is nonzero. The shipped
+     * eeprom.dat has 0 there, which would silence every game, so we always play and leave
+     * muting to the host (exen_audio_set_volume). The bytes are copied: the array may move or
+     * be collected while the melody plays. */
+    melody_play(vm, arr_data(vm, a[1]), arr_len(vm, a[1]));
     return 0;
 }
 
 static int n_stopMelody(ExenVM *vm, uint32_t *a) { (void)a; melody_stop(vm); return 0; }
-
-static int n_getNickName(ExenVM *vm, uint32_t *a)
-{
-    /* From the EEPROM config's 28-byte nickname buffer (0x423b63); the field offset is not
-     * decoded yet, so the nickname is empty. */
-    a[0] = new_char_array(vm, NULL, 0);
-    return 1;
-}
-
-static int n_setNickName(ExenVM *vm, uint32_t *a)
-{
-    (void)a;
-    vm_log(vm, "Gamelet.setNickName: edit box not supported");
-    return 0;
-}
 
 static int n_getVersionInfo(ExenVM *vm, uint32_t *a)
 {
@@ -250,14 +223,11 @@ void gamelet_register(void)
     natives_register(75, n_getTimerTickCount);
     natives_register(76, n_startTimer);
     natives_register(77, n_stopTimer);
-    natives_register(78, n_sendSms);
     natives_register(79, n_saveCtx);
     natives_register(80, n_loadCtx);
     natives_register(81, n_playVibrator);
     natives_register(82, n_playMelody);
     natives_register(83, n_stopMelody);
-    natives_register(84, n_getNickName);
-    natives_register(85, n_setNickName);
     natives_register(86, n_getVersionInfo);
     natives_register(87, n_getProperty);
     natives_register(88, n_platformRequest);

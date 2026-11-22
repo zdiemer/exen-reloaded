@@ -31,7 +31,7 @@ All integers little-endian.
 | `0x0e` | ? | |
 | `0x03` | ? | |
 | `0x0f` | ? | usually exactly one per game |
-| `0x04` | melody? | BombJack, Tomb Raider: arrays of `(note, duration)`-looking u8 pairs |
+| `0x04` | melody | Raw ExEn melody bytes, `(note, duration)` pairs ([`docs/re/NATIVES.md`](re/NATIVES.md) §3.2). Confirmed for BombJack: resource 46 (116 bytes, padding included) is the array it passes to `Gamelet.playMelody`. |
 | `0xff` | empty | zero-length placeholder |
 | `0xd0`–`0xda` | ? | only in the later In-Fusio titles (IFSki*, Pikubi*, MonkeyBusiness, IFSudoku) |
 

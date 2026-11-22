@@ -20,6 +20,7 @@ void platform_set_font(ExenVM *vm, const uint8_t *bits);
 #define BS_KEYRELEASE 0x305a1e56u
 #define BS_TICK       0x3f522033u
 #define BS_EXIT       0x3f523566u
+#define BS_SMSSENT    0x305a7631u /* smsSent(I)V */
 
 static void set_error(ExenVM *vm, const char *msg)
 {
@@ -177,7 +178,21 @@ static int call_bootstrap(ExenVM *vm, uint32_t hash, uint32_t *args, int nargs)
     /* The original collects after every callback; we collect when the heap is half full. */
     if (vm->heap_used > (vm->heap_end - vm->heap_start) / 2)
         heap_gc(vm);
-    return r < 0 ? -1 : 0;
+    if (r < 0)
+        return -1;
+    /* Events a native queued for after the callback, never delivered re-entrantly: sendSms
+     * reports its (failed) send through Bootstrap.smsSent (sms.c). One delivery per host
+     * callback: a send made by the smsSent handler itself is reported after the next one, so a
+     * game that retries on failure cannot recurse here. */
+    if (vm->ext.sms_sent && !vm->halted && !vm->ext.delivering) {
+        uint32_t status = (uint32_t)vm->ext.sms_status;
+        vm->ext.sms_sent = 0;
+        vm->ext.delivering = 1;
+        r = call_bootstrap(vm, BS_SMSSENT, &status, 1);
+        vm->ext.delivering = 0;
+        return r;
+    }
+    return 0;
 }
 
 int exen_boot(ExenVM *vm)

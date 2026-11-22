@@ -147,6 +147,15 @@ struct ExenVM {
     /* Platform state owned by the native layer (natives_*.c). */
     struct ExenPlatform *plat;
 
+    /* State of the natives in extnatives.h. Plain data, zero-initialised with the VM. */
+    struct {
+        int cls[16];        /* framework class index + 1 (0 = unresolved), see ext_class() */
+        uint32_t warned;    /* log-once bits */
+        int sms_sent;       /* a Bootstrap.smsSent(status) delivery is queued (api.c) */
+        int32_t sms_status;
+        int delivering;     /* api.c is running a queued delivery */
+    } ext;
+
     /* the loaded game */
     uint8_t *exn;
     size_t exn_len;

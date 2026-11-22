@@ -6,6 +6,7 @@
 #ifndef EXEN_PLATFORM_H
 #define EXEN_PLATFORM_H
 
+#include "melody.h"
 #include "natives.h"
 
 /* The built-in 5x8 font: a 1-bit strip of 256 glyphs, 8 rows of 160 bytes (gensimu.exe VA
@@ -35,6 +36,8 @@ struct ExenPlatform {
     int timer_ms;                   /* current timer period, -1 = stopped */
 
     uint8_t *fb;                    /* width*height RGB332, what the "LCD" shows */
+
+    Melody melody;                  /* melody.c */
 
     int cls[PC_COUNT];              /* -2 = unresolved, -1 = missing */
     uint32_t warned;                /* log-once bits */

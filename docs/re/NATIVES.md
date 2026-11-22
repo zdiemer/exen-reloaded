@@ -274,14 +274,14 @@ getCharWidth/getCharHeight are bytecode and are not in this range.
 | 75 | Gamelet.getTimerTickCount()I (static) | 0x425090 | `GetTickCount() - base` in **ms** (0x435d3f) | H |
 | 76 | Gamelet.startTimer(I)V | 0x4250a3 | if `ms >= 0`: EXManufSetTimerTick(ms), clamped to 10..60000, then `SetTimer(hwnd,1,ms)` | H |
 | 77 | Gamelet.stopTimer()V | 0x4250ba | `KillTimer(hwnd,1)` | H |
-| 78 | Gamelet.sendSms(LSms;)V | 0x4250c7 | Gets the SMS native buffer (0x42989d) and the price index `sms.+0x34`. If the price is invalid (0x423b1d) or there is no network (0x423a00(3)), it stops timer and melody and sets VM exit state 3. Otherwise `0x4218d3(buf,1)` sends it via EXManufSmsSend. | M |
+| 78 | Gamelet.sendSms(LSms;)V | 0x4250c7 | Gets the SMS native buffer (0x42989d) and stores the price index `sms.+0x34` (m_type) at buffer byte 0x8c. If the price is invalid (0x423b1d: the 0x15-byte number at cfg+0x190+0x1c*idx is empty) or there is no network (0x423a00(3): the SIM's MCC/MNC must equal cfg+0x160/+0x162, or both be 0), it stops timer and melody, clears `[0x51f904]+0x1e` and sets VM exit state 3. Otherwise `0x4218d3(buf,1)` sends it via EXManufSmsSend and the result arrives later as Bootstrap.smsSent(status). **Port deviation:** we have no network but do not halt: the core queues `Bootstrap.smsSent(Gamelet.SMS_SENT_UNSUCCESSFULLY)` (static slot 1, 0 from `<clinit>`) and runs it after the current host callback returns (`call_bootstrap`, api.c), the way a handset reports a failed send. Games then show their own "SMS not sent" screen. | H |
 | 79 | Gamelet.saveCtx(B[])V | 0x425156 | Copies min(len,300) bytes into the gamelet's EEPROM record (`0x4153f8`, §3.1). Null is fatal. | H |
 | 80 | Gamelet.loadCtx(B[])V | 0x4251d4 | the reverse (`0x41547b`) | H |
 | 81 | Gamelet.playVibrator()V | 0x4253bc | If EEPROM `cfg+0x15e` is set: `EXManufVibratingDeviceRun(1000)` (0x4065e0(10)), which shakes the window for 1 s | H |
 | 82 | Gamelet.playMelody(B[])V | 0x425252 | If EEPROM sound `cfg+0x15c` is nonzero: EXManufMelodyPlay(data, byte length) (§3.2). Null is fatal. | H |
 | 83 | Gamelet.stopMelody()V | 0x4252df | EXManufMelodyStop | H |
-| 84 | Gamelet.getNickName()C[] | 0x4252ec | Nickname from the EEPROM config (0x423b63, 28-byte buffer) → new char[strlen] | M |
-| 85 | Gamelet.setNickName()V | 0x425372 | 16-byte buffer filled with 0xff. Sets VM state `+0xc=0xa`. Opens `EXManufUIEditBox(title 0xb, max 15)` (modal busy loop) through 0x403d8a. | M |
+| 84 | Gamelet.getNickName()C[] | 0x4252ec | 0x423b63 copies the 16 bytes at EEPROM **cfg+0x66** into a 28-byte stack buffer; 0x422f34 measures up to the first 0xff; new char[n]. The shipped eeprom.dat gives "Xcell". The port also stops at a 0 byte, so an all-zero EEPROM gives "". | H |
+| 85 | Gamelet.setNickName()V | 0x425372 | 16-byte buffer filled with 0xff. Sets VM state `+0xc=0xa`. Opens `EXManufUIEditBox(title 0xb, max 15)` (modal busy loop) through 0x403d8a; the result comes back through Bootstrap.NickNameChanged. **Port deviation:** no modal UI; a no-op (logged once) that keeps the stored name. | M |
 | 86 | Gamelet.getVersionInfo()I | 0x4253e3 | `(c[4]<<24)|(c[5]<<16)|(c[6]<<8)|c[7]` from EEPROM bytes 4..7, using **sign-extended** bytes (`movsx`). A byte ≥ 0x80 therefore ORs 1s into the higher bits. Shipped eeprom gives `0xffffff80`. | H |
 | 87 | Gamelet.getProperty(LString;)LString; (static) | 0x425427 | Null → throws (crc 0x364a8d65, NullPointerException). Searches the pair table at `0x4492cc` (count byte `0x4492d4` = 2, i.e. 1 pair) with exact length + byte compare. **The only key is `"FrameWork"` → `"V2.00"`.** Anything else returns null. | H |
 | 88 | Gamelet.platformRequest(LString;)Z | 0x42563e | always false | H |
@@ -298,7 +298,9 @@ never sends the KEY_PAD codes (arrows are mapped to digits, §4.2).
 
 ### 2.3 Resource, AnimBitmap, PlayField, AnimFlash, Displayable, DialogBox, FX, List, RayCast
 
-Decompilations: `natives/Resource.c.txt`, `AnimBitmap.c.txt`, `PlayField.c.txt`, `FX.c.txt`.
+Decompilations: `natives/Resource.c.txt`, `AnimBitmap.c.txt`, `PlayField.c.txt`, `FX.c.txt`. The
+RayCast engine, DialogBox and List were translated directly into `src/core/raycast.c` and
+`src/core/ui.c`, which carry the address of every routine; their summaries are below the table.
 
 | idx | method | C addr | semantics | conf |
 |---|---|---|---|---|
@@ -339,31 +341,97 @@ Decompilations: `natives/Resource.c.txt`, `AnimBitmap.c.txt`, `PlayField.c.txt`,
 | 64 | AnimFlash.getHeight(I)I | 0x42492a | returns field `height` (+0x28) | high |
 | 65 | Displayable.haveDisplayableCommand()Z | 0x424a60 | `cmdpos(0)` or `cmdpos(1)` (0x403f56 maps 0->2, 1->1), so it is **always true** in gensimu | high |
 | 66 | Displayable.drawCommand(Graphics,String label,int pos)V | 0x424a9d | Temporarily sets the dst EXimg clip to the full image (0,0,w,h); the Graphics clip is not used. Then 0x4238f0(chars, len, img, pos) draws the label with the built-in font (`[0x45ff3c]+0xc`) in **colour 0**: y = img.h - 9 (font op +4, glyphH), n = min(img.w/6, len) (op +0x18), nothing if n < 1 or y < 0. x by `cmdpos(pos)` through jump table 0x4239e3: 1 -> x = 1 (left), 2 -> op +0x20 = img.w - n*6 (right), 3 -> op +0x1c = (img.w - n*6)/2 (centre, unreachable), 0 -> not drawn. So pos 0 is right-aligned and pos 1 left-aligned. Text via drawText (op +0xc). Clip restored afterwards. A null label is dereferenced | high |
-| 101 | DialogBox.getNbLinesFormatted(String,width)I | 0x424940 | 0x423174 -> 0x40356e (manuf UI shim) -> 0x4231db: number of word-wrapped lines of text at that width | med |
-| 102 | DialogBox.drawBox(Graphics,x,y,w,Z)V | 0x42497c | sync_clip, clears the image (ops+0x28 via 0x4177a4), then passes a block to 0x42318d -> 0x403587 -> 0x4233ed. The block holds title chars/len, text chars/len, a flag of 1, `m_justify`, the dst image, args x,y,w,Z and `m_startTextY`. Real layout code is 0x4233ed | med (layout: low) |
-| 103 | FX.doRotazoom(g,img,angle,zoom,cx,cy)V | 0x424b70 | fx[0]=0x415b6a. Rotate/zoom (16.16, zoom 0 = 1:1). Power-of-2 sources wrap | med |
-| 104 | FX.doMosaic(g,img,x,y,level)V | 0x424bfd | fx[1]=0x415fc6. Block copy, level>=16 (16 = identity) | low/med |
-| 105 | FX.doShiftHorizontal(g,img,x,y,byte[])V | 0x424c84 | fx[4]=0x41688d. Per-row horizontal offset, array length not checked | med |
-| 106 | FX.doShiftVertical(g,img,x,y,byte[])V | 0x424d62 | fx[5]=0x416b75. Per-column offset | med |
-| 107 | FX.doShutterVertical(g,img,step,Z)V | 0x424e40 | fx[2]=0x4162d0. Column blinds in groups of 8 | low |
-| 108 | FX.doShutterHorizontal(g,img,step,Z)V | 0x424ed2 | fx[3]=0x416715. Row blinds | low |
-| 109 | List.drawList(Graphics,x,y)V | 0x426870 | Builds `{chars,len,property}[]` from `m_captions` (String[]) and `m_properties` (int[]). sync_clip, then 0x41b910 -> 0x403598 -> 0x41b950. That function clears the image and draws each item with the global font. The `m_current` item gets a highlight bar (fillRect 0x417d92). BRANCH items get a marker (0x41bae8) | med/low |
-| 137 | RayCast.draw(Graphics,x,y,angle?)V | 0x4284c9 | 0x4282b0 refreshes engine globals from fields, then null checks (map, wallgraph_width_poxOf2), then sync_clip, then render 0x41f4db | med |
-| 138 | RayCast.isThereAWall(I,I)I | 0x428683 | 0x41f5b9, map cell test | med |
-| 139 | RayCast.addMonster_internal(I,I,I)I | 0x4286c9 | 0x42022a | med |
-| 140 | RayCast.findFirstSpriteFreeID()I | 0x428716 | 0x4201bf | med |
-| 141 | RayCast.removeSprite(I)V | 0x42874b | 0x4202c9 | med |
-| 142 | RayCast.moveSprite(I,I,I,I)V | 0x42877a | 0x420511 | med |
-| 143 | RayCast.setSpritePos(7 ints)V | 0x4287be | index range check, then 0x420302 | med |
-| 144 | RayCast.setSpriteSize(I,I,I)V | 0x4288d3 | 0x420412 | med |
-| 145 | RayCast.changeInternalValues_internal(6 ints)V | 0x428910 | 0x41f0da | med |
-| 146 | RayCast.castRay(I,I,I,I[])I | 0x428962 | 0x41f3fe and 0x41f7f2, results go into the int[] | med |
+| 101 | DialogBox.getNbLinesFormatted(String,width)I | 0x424940 | 0x423174 -> 0x40356e -> 0x4231db -> 0x4231f6(s, len, width, -1): the number of word-wrapped lines, see "DialogBox and List" below. A null String is dereferenced | high |
+| 102 | DialogBox.drawBox(Graphics,width,height,scrollLine,Z cursor)V | 0x42497c | paint() passes getWidth(), getHeight(), m_scrollLine, m_doDisplayCursor. sync_clip, clear (white fill of (0,0,clipW,clipH)), then 0x42318d -> 0x403587 -> 0x4233ed with a block {title chars/len, 1 (title centred), text chars/len, m_justify, dst, scrollLine, cursor, m_startTextY, 0, width, height}. Layout below | high |
+| 103 | FX.doRotazoom(g,img,angle,zoom,cx,cy)V | 0x424b70 | fx[0]=0x415b6a. Rotate/zoom over the whole destination, ignoring the clip. zoom is added to 1.0 (>0 shrinks). The source **always tiles**: masks for power-of-2 sizes (0x415d19), repeated subtraction otherwise (0x415e5d), both with the width as row stride. See FX.c.txt | high |
+| 104 | FX.doMosaic(g,img,x,y,level)V | 0x424bfd | fx[1]=0x415fc6. Scaled copy whose sample steps come from 4.12 arithmetic, level >= 16 (16 = identity). No clip | high |
+| 105 | FX.doShiftHorizontal(g,img,x,y,byte[])V | 0x424c84 | fx[4]=0x41688d. Row r moves by (s8)offs[r]+x; the array length is not checked. Uses the destination clip **and the source image's stored clip height** | high |
+| 106 | FX.doShiftVertical(g,img,x,y,byte[])V | 0x424d62 | fx[5]=0x416b75. Column c moves by (s8)offs[c]+y; uses the source's stored clip width; a negative x reads the source from 2*abs(x) | high |
+| 107 | FX.doShutterVertical(g,img,step,Z)V | 0x424e40 | fx[2]=0x4162d0. Column blinds in groups of 8 from the data origin (the clip only bounds the size); columns revealed per group from 0x4165f5 | high |
+| 108 | FX.doShutterHorizontal(g,img,step,Z)V | 0x424ed2 | fx[3]=0x416715. Row blinds, h/8 groups of whole source rows, no clipping | high |
+| 109 | List.drawList(Graphics,width,height)V | 0x426870 | Builds `{chars,len,property}[]` from `m_captions` and `m_properties` in a do-while (an empty list reads item 0 and loops ~2^32 times). sync_clip, then 0x41b910 -> 0x403598 -> 0x41b950, see below | high |
+| 137 | RayCast.draw(Graphics,x,y,angle)V | 0x4284c9 | 0x4282b0 points the engine at the fields; null map or wallgraph_width_poxOf2 is logged and returns; wall EXimgs 1..15 and every sprite's images are refreshed; sync_clip; render 0x41f4db. See "RayCast engine" | high |
+| 138 | RayCast.isThereAWall(I,I)I | 0x428683 | 0x41f5b9: cell ((x>>16)/64, (y>>16)/64); 0 outside the inner map (cx,cy >= 1, idx in [W, (H-1)*W)); else 0 only if cell.hi, cell.lo, below.hi and right.lo nibbles are all set, otherwise 1 | high |
+| 139 | RayCast.addMonster_internal(id,w,h)I | 0x4286c9 | 0x42022a: active=1, images cleared, size and source rect (0,0,w,h); -5 for a bad id | high |
+| 140 | RayCast.findFirstSpriteFreeID()I | 0x428716 | 0x4201bf: first inactive sprite, -1 if none, **0 when there is no sprite list** | high |
+| 141 | RayCast.removeSprite(I)V | 0x42874b | 0x4202c9: active=0 | high |
+| 142 | RayCast.moveSprite(id,x,y,z)V | 0x42877a | 0x420511: 16.16 world position; z is the height above the floor | high |
+| 143 | RayCast.setSpritePos(id,sx,sy,sw,sh,mx,my)V | 0x4287be | range check against num_monster_Max, refresh the sprite's images, then 0x420302: rect (sx,sy,sw,sh) in the sprite image and (mx,my) in the mask, validated against both | high |
+| 144 | RayCast.setSpriteSize(id,w,h)V | 0x4288d3 | 0x420412: world size, both > 0 | high |
+| 145 | RayCast.changeInternalValues_internal(viewW,viewH,wallH,step,horizonOff,maxSteps)V | 0x428910 | 0x41f0da, see below. **Sets exen.Math's sine period** to 6*viewW as a side effect | high |
+| 146 | RayCast.castRay(x,y,angle,int[] out)I | 0x428962 | 0 if out is null or shorter than 6. Sets and clamps the position (0x41f3fe), casts one ray (0x41f7f2): out = {hitX, hitY, raw distance, corrected distance, wall nibble, texture column}; returns 1 | high |
 
-RayCast fields: `wallGraph_Table` (Image[]), `wallgraph_width_poxOf2` (byte[]), `num_monster_Max`,
-`spriteImages`/`maskImages` (Image[]), `internal_rayc_values`, `internal_sprite_list`, `sliceInfos`,
-`maze_map_pointer` (byte[]), `mapWidth`/`mapHeight`. The engine ("exrayc", error strings at
-0x45a35c..0x45a7dc) sits at 0x41f0da..0x420600. Its column renderer is `raycDrawVerticalSlice`
-(strings at 0x45bd44). I did not analyse it further.
+RayCast fields: `wallGraph_Table` (Image[16]), `wallgraph_width_poxOf2` (byte[16], log2(width)-3),
+`num_monster_Max`, `spriteImages`/`maskImages` (Image[]), `internal_rayc_values` (byte[452]),
+`internal_sprite_list` (byte[84*max]), `sliceInfos` (byte[8*viewW]), `maze_map_pointer`
+(byte[W*H]), `mapWidth`/`mapHeight`.
+
+#### RayCast engine ("exrayc", 0x41f0da..0x420ca8) [H]
+
+Read instruction by instruction and translated in `src/core/raycast.c`, whose header comment
+gives the layout of the engine state and of a sprite. Summary:
+
+- **State** lives in `internal_rayc_values`. Every native first runs 0x4282b0, which points a
+  global (`[[0x45ff3c]+0x2c]`) at it and copies the map, slice and sprite-list pointers, the map
+  size and the sprite count into it. A null `internal_rayc_values` is fatal (interrupt 0x27). Three
+  84-byte nodes inside it hold the sprite blit parameters, the mask blit parameters and the head of
+  the draw list.
+- **Units**: positions are 16.16 with 64 units per map cell. Angles use a circle of `6*viewW`
+  units (the field of view is `viewW` units, 60 degrees), through exen.Math's getSin/CosOfPeriod
+  with the period that changeInternalValues sets globally. draw() switches the period to the
+  engine's and back; **castRay does not**, so it uses whatever period the game last set.
+- **changeInternalValues(w, h, wallH, step, hoff, steps)** (0x41f0da): only positive values are
+  taken, and `step` only if it is 1 or 2 (2 rounds w down to even). Derived: rays = w/step,
+  half FOV = w/2, quarter turns 3w/2, 3w and 9w/2, circle 6w, horizon = h/2 + hoff (h is used even
+  when it is <= 0), projection distance = |(w/2)*cos(w/2) / sin(w/2)| (1 if the sine is 0).
+  Java's init passes (w, h, 64, 1, 0, 16).
+- **Rays** (0x41f7f2): the classic two-pass grid walk. The horizontal-line pass halves sin/cos with
+  `sar` (floor), the vertical-line pass with a truncating division. Slopes are `(c<<16)/s`, or
+  0xc80 when the divisor is 0. The first intersection is biased by +-0x7fff. Each pass walks at
+  most `maxSteps` cells, and an exact quarter angle skips its pass. A map byte's high nibble is the
+  wall seen across horizontal grid lines, the low nibble the wall across vertical ones. Distances
+  are delta/sin or delta/cos in whole units; the nearer pass wins (a tie goes to the vertical
+  pass). The fisheye correction multiplies by cos(angle - **the angle of the last draw()**). The
+  texture column is the hit offset inside the cell, mirrored by step direction.
+- **Walls** (0x41fee7): one slice per ray, from the clip's x to the end. Wall height is
+  `wallH*projDist/dist`, centred on the horizon. The column renderer is the destination's ops
+  slot 17 (8bpp 0x42ccc4, a no-op on other depths): 1 or 2 pixels wide, clipped vertically only,
+  texture row stride `8 << log2width`. Raw textures copy bytes; paletted 8bpp and 4bpp textures go
+  through the global LUT. Floor and ceiling are not drawn: the game paints them first.
+- **Sprites** (0x42055c, 0x42080d): active sprites are rotated into view space (products of `>>8`
+  values), projected (scale = projDist/depth), culled, and inserted in a far-to-near list. Each one
+  is drawn with drawImageCore (scaled, with the source's own transparency) in runs of columns where
+  it is nearer than the wall slice. The mask image is validated by setSpritePos but never drawn.
+- Quirks the port keeps: the `0x7fff` bias, the bounds of isThereAWall, findFirstSpriteFreeID
+  returning 0 without a list, castRay's dependency on the global period, and draw's use of clipX as
+  the first slice index even when the column step is 2.
+
+#### DialogBox and List (0x4231f6, 0x4233ed, 0x41b950) [H]
+
+- **Word wrap**, 0x4232ee(s, len, max) with max = width/6: scan to a space, a '\n' or the limit. A
+  '\n' ends the line and counts in it. After a space, it recurses on the rest with `max-i-1` and
+  takes the longer line when `total < max` (strict). Words longer than a line are split. The scan
+  reads the byte after the string.
+- **Line count**, 0x4231f6(s, len, width, limit): repeat {take a line; skip one following space}.
+  With `limit >= 0` it returns the byte offset where line `limit` starts instead. A zero-width line
+  never advances, so the original hangs on it. **Quirk:** the count gets one extra line when the
+  profile's maximum LCD height (0x45c7c8) is a multiple of 10, i.e. on the 101x80 profiles.
+- **drawBox** (0x4233ed): skip = max(scrollLine - startTextY/10, 0) lines. With a title, a blue
+  (RGB332 3) bar of height 9 spans the image and the title is centred in white, drawn twice (at x
+  and x+1, for bold); the text then starts at y=10. Text starts at max(y + startTextY -
+  10*scrollLine, y), lines are 10 pixels apart, black, justified by m_justify (1 centre, 2 right,
+  otherwise left), and drawn while `y + ty + 1 < height` (so the title height counts twice). If the
+  text is not scrolled to its end (`max(lines + startTextY/10 - (height/10 - 1), 0) != scrollLine`)
+  and the cursor flag is set, the 8x4 down arrow at 0x456d70 (1 bit, black on white, opaque) is
+  drawn at ((width-6)/2, height-5).
+- **drawList** (0x41b950): rows of 11 pixels, at most height/11 of them. When m_current > 3 the
+  list scrolls so that the current item is on the fourth row. LEAF (1) items are drawn at x=5 in
+  black, BRANCH (0) items at x=0 in RGB332 2, each twice (bold). The current item gets a 12-pixel
+  RGB332 0x10 bar across `width` and white text. Each BRANCH row is followed by a black rule at its
+  bottom made of the segments [0, w-25], then gaps of 2 and lengths 3, 2, 1, 0, plus one extra
+  pixel of spacing.
+- Both natives first clear the target with ops slot 10: a white fill of (0, 0, clipW, clipH), the
+  clip's size but not its position.
 
 #### Resource format (how natives see the `.exn`)
 
@@ -473,7 +541,7 @@ Decompilations: `natives/math.c.txt`, `vec3d_matrix3d.c.txt`, `string.c.txt`, `s
 | 97 | Sms.getIdBlock()I | 0x429cb0 | if pos>=0x460 (1120 bits = 140 B) returns -1; else blockStart=pos, id=read 8 bits, returns id | high |
 | 98 | Sms.getLengthBlock()I | 0x429d2a | reads 11 bits into `+0x2c`, returns it | high |
 | 99 | Sms.skipBits(I n)V | 0x429d86 | if pos+n<=0x460: pos+=n, consumed(+0x30)+=n | high |
-| 100 | Sms.getPrice()LString; | 0x429e0a | Price from the config `[0x45fe8c]+0x1a8 + 0x1c*this.+0x34` (16.16 value) formatted as `"%d.%02d \xff"` (fn `0x422e57`), with the currency string at `cfg+0x168` appended (e.g. "Euro(s)") | med |
+| 100 | Sms.getPrice()LString; | 0x429e0a | The 16.16 value at EEPROM `cfg+0x1a8 + 0x1c*m_type`, formatted by 0x422e57 with the fixed-width itoa 0x422bc8 (at most width-1 digits): integer part (width 4, <= 3 digits), '.', a '0' if cents < 10, cents (width 2, so **only the last digit**), ' ', then the 0xff-terminated currency at `cfg+0x168` ("Euro(s)"). Cents = (frac*100)>>16, so the shipped table gives "0.00 ", "0.0 " (0.11), ... | high |
 | 110 | Math.sin(I)I | 0x426990 → 0x41c956 | `cos(a-0x200)` | high |
 | 111 | Math.cos(I)I | 0x4269ac → 0x41c972 | table lookup, 2048 units/turn, result ±65535 (16.16) | high |
 | 112 | Math.getAngle(I x,I y)I | 0x4269c8 → 0x41ca3c | atan2(y,x) in 0..2047 using isqrt and a binary search of the cos table; (0,0) gives 0 | high |
@@ -532,12 +600,12 @@ Decompilations: `natives/math.c.txt`, `vec3d_matrix3d.c.txt`, `string.c.txt`, `s
 | 175 | Runtime.gc()V | 0x42b2a0 → 0x40a30b | Mark and sweep over the heap object list at `[0x51f90c]`. Roots are objects with the +0xe/+0xf counts nonzero (plus the stack). Sweep frees objects whose u16 +0xc mark is 0. | med |
 | 176 | Runtime.createTempClass(B[],I)Z | 0x42b2ad | null → NPE (0), n>len → AIOOBE (0); else `0x410060()` which is a stub returning 0, so always false | high |
 | 177 | Runtime.getTickCount()I | 0x42b338 → 0x435d3f | `GetTickCount() - base`, in ms. The base `[0x50498c]` is set by 0x43f5aa from the gamelet start/init routine 0x438c06. **Win32 GetTickCount** (10-16 ms granularity). | high |
-| 178 | Catalog.doesGameExist(LGameProperty;)Z | 0x4240a0 | `0x423bd0(gp.fileId u16 @+0x34)`: checks the flash/catalog table in config `[0x45fe8c]` (CRC compare) | med |
-| 179 | Catalog.launchGameIfPresent(LGameProperty;)Z | 0x4240e1 | Writes the launch request to `[[0x45ff3c]+0x34]` (+0x1c=fileId, state=5). Then stops the timer (0x435dde) and melody (EXManufMelodyStop), sets the VM exit flag `[[0x45ff3c]+0x24]=1` and returns 1. The host loads the new gamelet after the VM exits. Returns 0 if absent. | med |
+| 178 | Catalog.doesGameExist(LGameProperty;)Z | 0x4240a0 | `0x423bd0(gp.fileId u16 @+0x34)`: checks the flash/catalog table in config `[0x45fe8c]` (CRC compare). Port: no catalog, false | med |
+| 179 | Catalog.launchGameIfPresent(LGameProperty;)Z | 0x4240e1 | Writes the launch request to `[[0x45ff3c]+0x34]` (+0x1c=fileId, state=5). Then stops the timer (0x435dde) and melody (EXManufMelodyStop), sets the VM exit flag `[[0x45ff3c]+0x24]=1` and returns 1. The host loads the new gamelet after the VM exits. Returns 0 if absent. Port: no catalog, false | med |
 | 180 | Catalog.isUserRegistred()Z | 0x424178 → 0x423b7f | tests registration fields in config `[0x45fe8c]` | med |
-| 181 | Catalog.downloadGame(LGameProperty;)V | 0x424194 | Copies name (≤16 B) / fields into the launch struct and stops. `0x423a00(3)` checks connectivity (MCC/MNC via EXManufGetMccMnc). On failure: state 0, exit code 3. Otherwise state=registered?2:6 and the exit flag is set. The actual EXManufConnectionOpen/DownloadFile happens in the host after the VM exits. | med-low |
-| 182 | Catalog.doEditBox(LString;)V | 0x4242b2 | Title (≤14 chars, 0xff padded) → EXManufStringRegister (0x406674). Sets `[[0x45ff3c]+0x24]+0xc=0xb`, then 0x403d8a → **EXManufUIEditBox(titleID, maxSize=6)**, which runs a modal PeekMessage loop (0x4364c3) into a 7-byte buffer. | med |
-| 183 | Catalog.atoi(LString;)I | 0x424375 → 0x422ad2 | decimal parse of pstr | med |
+| 181 | Catalog.downloadGame(LGameProperty;)V | 0x424194 | Copies name (≤16 B) / fields into the launch struct and stops. `0x423a00(3)` checks connectivity (MCC/MNC via EXManufGetMccMnc). On failure: state 0, exit code 3. Otherwise state=registered?2:6 and the exit flag is set. The actual EXManufConnectionOpen/DownloadFile happens in the host after the VM exits. Port: does nothing (logged once), no exit | med-low |
+| 182 | Catalog.doEditBox(LString;)V | 0x4242b2 | Title (≤14 chars, 0xff padded) → EXManufStringRegister (0x406674). Sets `[[0x45ff3c]+0x24]+0xc=0xb`, then 0x403d8a → **EXManufUIEditBox(titleID, maxSize=6)**, which runs a modal PeekMessage loop (0x4364c3) into a 7-byte buffer. Port: no-op, logged once | med |
+| 183 | Catalog.atoi(LString;)I | 0x424375 → 0x422ad2 | decimal parse of pstr: skip spaces, optional '-', digits; -1 when there are no digits or the length runs out (also after leading spaces or a lone '-') | high |
 | 184 | GameProperty.joke()V | 0x4243c0 | no-op | high |
 
 #### Math tables / PRNG — high confidence
@@ -583,11 +651,30 @@ All values are 16.16. The Matrix3D field +0x18 is an int[16], row-major `m[r*4+c
 - `cfg = [0x45fe8c]`, the simulator's network/eeprom config.
 - A block is `id:8, len:11 (bits), payload`.
 - Language ids (0x4341cc): English 1, Dutch 5, French 3, German / German D2 0, Italian 2, Portuguese 8, Spanish 4, default 1.
+- **The 0x94-byte buffer overruns its array.** Sms's constructor allocates `java_exsms` as a
+  byte[142], but the natives use 0x94 = 148 bytes of it: the end of the payload and the u32 bit
+  position at +0x90 lie past the array, in the following heap bytes. The port keeps them in the
+  padding of the array's heap block (a byte[142] block is 160 bytes in our heap) and refuses a
+  block that is smaller.
+- The header's cfg bytes are passed sign-extended, and putbits does not mask its value: a byte
+  >= 0x80 written at a position that is not byte-aligned would OR ones into the preceding bits (the
+  header itself is aligned). getbits' 5-byte case (0x412fab) combines its two words with `<< 2`
+  instead of the right shift; the port keeps it.
+- `cfg` is the EEPROM image itself (flash/eeprom.dat): currency at +0x168, price table at +0x1a8
+  (28-byte entries, the value first; 0x423b1d tests a 0x15-byte number string 0x18 bytes before
+  it), registration bytes +0x1e..+0x21, nickname +0x66 (16 bytes), home network MCC +0x160 and
+  MNC +0x162.
+- **Port:** MCC/MNC 0 (no SIM) and language 1 go into the header. Nothing is ever sent; see native
+  78 for how a send is reported.
+- **Catalog** (178-183) in the port: doesGameExist and launchGameIfPresent return false;
+  downloadGame does nothing (the original records a launch or download request and exits the VM so
+  that the host can act on it); isUserRegistred tests cfg+0x1e..+0x21 (true with the shipped
+  eeprom.dat); atoi is 0x422ad2.
 
 #### Win32-specific / notable
 
 - Runtime.getTickCount uses GetTickCount (coarse resolution). The simulator log goes to `simulator.log`.
-- doEditBox blocks in its own PeekMessage modal loop.
+- doEditBox and setNickName block in their own PeekMessage modal loop (the port does not block).
 - Behaviour that must be reproduced, not "fixed", for fidelity:
   - Object.wait does not wait.
   - String.compareTo's length tiebreak is inverted.
@@ -682,34 +769,73 @@ the core-side caller and the simulator behaviour.
 ### 3.2 Melody playback (`0x43b192`, timer proc `0x43ad57`) [H]
 
 Melodies are byte pairs `(a, b)` played through `midiOutShortMsg` on the default MIDI device. Playback
-runs from a `SetTimer(hwnd, 10, ms, 0x43ad57)` timer-proc chain, re-armed after every event.
+runs from a **periodic** Win32 timer, `SetTimer(hwnd, 10, ms, 0x43ad57)`. Each firing handles one event
+and usually re-arms the timer with the next period; a firing that does not re-arm keeps the old period.
+Re-read from the disassembly (2026-11, issue #16); `docs/re/natives/melody.c.txt` has the pseudocode.
 
-- Start: midiOutOpen (once), master volume `0x80808080`, `prev_note = 0xffff`, then the first timer
-  fires after 10 ms.
-- Before handling each event, if `prev_note >= 1`, the player sends **note-off**
-  `0x80|ch, prev_note, 0`. The duration is taken from `dur[b % 14]`.
-- `a <= 0x7f`: **note**.
-  - `a == 0` ends the melody, but only if `size > 2`. Otherwise the zero is held as a rest.
-  - `a > 0`: note-on `0x90|ch, a, 0x40`. The next timer fires after `(1875 / tempo) * dur[b % 14]` ms,
-    where `dur = {0xc0,0x80,0x60,0x40,0x30,0x20,0x18,0x10,0x0c,8,6,4,3,2}` and `tempo` is
-    `[0x45caac] = 120` by default.
-- `a >= 0x80`: **command**, then the next pair is processed immediately (recursive call), except for
-  0x82.
-  - `0x80`: channel = b & 0xf
-  - `0x81`: program change. b == 0 selects channel 9 (drums) with program 0. Otherwise `0xC0|ch, b`
-    (b ≤ 0x80).
-  - `0x82`: rest of `dur[b % 14]` (waits for the next tick, no note)
-  - `0x83`: retime, timer = 1875 / b
-  - `0x84`: volume = b (`0x43ac4e`)
-  - `0x85`: L/R balance via midiOutGet/SetVolume
-- The event counter `[0x4c658c]` is compared with `size`, which the caller passes as the **byte length**
-  of the array, while every event consumes 2 bytes. Without a 0 terminator the player can therefore read
-  past the array. Faithful ports should stop at the end of the array.
-- `Gamelet.playMelody` (`0x425252`) only calls this when EEPROM `cfg+0x15c` (sound) is nonzero. The
-  shipped eeprom.dat has volume 0, so **melodies are silent by default**.
-- Timer resolution is the USER timer (10 to 16 ms), so short notes are quantised.
+- Start (`0x43b192`, via EXManufMelodyPlay `0x434790`): midiOutOpen(device 0) every time (the
+  `need_open` flag `0x45cab0` is never cleared), `mel_size` = size, event count 0, device volume
+  `0x80808080` (both channels at 0x80/0xff), `prev = 0xffff`, then `SetTimer(..., 0, ...)`: elapse 0 is
+  raised to USER_TIMER_MINIMUM, so the first event comes **10 ms** after playMelody. A play while a
+  melody runs simply restarts (the note sounding on the old handle is never turned off). The channel
+  byte `0x4c6596` is a global that start does not reset.
+- Each firing, first: if `prev >= 1`, `cur_dur = dur[mel_ptr[1] % 14]` (the pair about to be handled)
+  and **note-off** `0x80|ch, prev, 0`. So a note lasts exactly until the next event: notes are legato,
+  there is no gap, and the player is **monophonic** (one note at a time, on one channel).
+- Then `if (++ev_count >= mel_size) return;` and `prev = a`.
+- `0 < a <= 0x7f`: **note-on** `0x90|ch, a, 0x40` (velocity fixed at 64), advance, and re-arm with
+  `(1875 / tempo) * cur_dur` ms. `tempo` `[0x45caac]` = 120 and **nothing writes it** (its only
+  reference is this read), so the unit is `1875 / 120 = 15` ms (integer division: 125 bpm instead of
+  the nominal 120).
+- `dur = {0xc0,0x80,0x60,0x40,0x30,0x20,0x18,0x10,0x0c,8,6,4,3,2}` in units of 1/32 beat: index
+  1, 3, 5, 7, 9, 11, 13 = whole, half, quarter, 1/8, 1/16, 1/32, 1/64; the even indices are the
+  dotted values. At 15 ms: whole 1920 ms, quarter 480, 1/8 240, 1/16 120, 1/64 30.
+- `a == 0`: end. If `size > 2` the player calls melody_stop (`0x43b259`); with a 2-byte melody it just
+  returns (silence). There is **no loop marker**: games loop music by calling playMelody again.
+- `a >= 0x80`: **command**: `cur_dur = 0`, then by `a - 0x80` (jump table `0x43b17a`):
+  - `0`: channel = b & 0xf
+  - `1`: program change. b == 0: channel = 9 (GM drums) and `0xC9` (program 0). 1..0x80: `0xC0|ch, b`.
+    Larger b is ignored.
+  - `2`: "rest": `cur_dur = dur[b % 14]`, but the pair is **not advanced past and the timer is not
+    re-armed**, so every later firing re-reads the same 0x82 pair until the event count runs out. In
+    effect 0x82 ends the melody silently (a simulator bug; no game in the corpus uses it).
+  - `3`: `SetTimer(1875 / b)`. Always overridden by the re-arm of the next note, or moot because the
+    melody ends, so it has no audible effect. b == 0 divides by zero.
+  - `4`: volume b (`0x43ac4e`): if both channel high bytes are equal, both become b (`b * 0x101`);
+    otherwise only the channel that was nonzero gets b and the other becomes 0.
+  - `5`: balance (midiOutGetVolume/SetVolume on the high bytes): b < 0x80 ORs the right level into the
+    left and zeroes the right; b > 0x80 the opposite; b == 0x80 copies left to right if right is 0,
+    else ORs right into left.
+  - `0x86`..`0xff`: ignored.
+  - Except for `2`, the next pair is then handled at once (a recursive call into the timer proc, which
+    runs the note-off/count steps again; the note-off is for the command byte, a no-op).
+- The event counter is compared with `size`, the **byte length** of the array (`Gamelet.playMelody`
+  `0x425252` passes the u16 array length), while every event consumes 2 bytes. Without a 0 terminator the
+  player reads up to `size/2 - 1` pairs past the array. Faithful ports should stop at the end of the
+  array.
+- Stop (`0x43b259`, EXManufMelodyStop): `ev_count = size`, KillTimer(10), short message `0xff`
+  (system reset: programs back to 0), midiOutClose.
+- `Gamelet.playMelody` (`0x425252`) only calls EXManufMelodyPlay when EEPROM `cfg+0x15c` (sound) is
+  nonzero. The shipped eeprom.dat has 0 there, so **melodies are silent by default** in the simulator.
+  EXManufSetVolume (`0x4347d2`, at VM init from the same byte) only sets the MIDI device volume, and
+  every melody start resets it to 0x80, so the byte acts as an on/off switch.
+- The timer is a USER timer, so periods are rounded up to the system tick (10 to 15.6 ms): on a
+  15.6 ms tick a 240 ms note lasts 250 ms. This depends on the host and is not part of the format.
 
-The pseudocode is in `docs/re/natives/melody.c.txt`.
+**Corpus** (33 of 47 games call playMelody; 79 distinct melodies captured with `exen-run --melodies`):
+no game uses a command byte; notes span MIDI 28..74 (E1..D5); duration indices 1..9, mostly 7 and 8
+(1/8 and dotted 1/16). Most melodies have no terminator; BombJack's come from type-0x04 resources whose
+4-byte padding supplies `00 00` pairs. Melodies double as sound effects: short 1- to 4-note jingles are
+common, and Arthur & Les Pirates, Flynn and XMasTales call playMelody over 200 times in 1500 ticks.
+
+**exen-reloaded** (`src/core/melody.c`): the sequencer is a port of the timer proc running on the
+audio sample clock (an event at `t` ms lands on sample `ceil(t * rate / 1000)` from the start), with
+the deviations noted above (stop at the array end; release the old note on restart). The core
+synthesizes the notes itself instead of using MIDI: a PolyBLEP square wave, 3 ms attack, decay to
+60 % over about 250 ms, 12 ms release, a one-pole low-pass, and the 0x84/0x85 levels as L/R gains. Channel 9
+plays noise bursts. The original's MIDI timbre would be GM piano (program 0), but a square voice is
+closer to a 2003 handset. The EEPROM sound byte is **not** honoured, because the shipped EEPROM would
+silence every game; hosts mute with `exen_audio_set_volume`.
 
 ---
 
@@ -977,5 +1103,12 @@ records at `0x4c65a8`:
 - Whether 2bpp grey (fmt 3) is reachable at all, given that only 8-bit profiles load and depth is
   hard-wired to 8.
 - Profile a real game to confirm which of the §4.5 costs dominates the reported very low frame rates.
-- Melody `size` semantics (bytes vs events) and whether real games always terminate with note 0.
+- Melody: what real handsets do with command 0x82 (the simulator stalls on it), and whether they use
+  the MIDI note numbers as is (BombJack goes down to E1, 41 Hz).
 - ExEn events 0x4xx/0x7xx/0x8xx and the UI-state numbers of `0x43f591` (4 = game, 5 = menu, 7 = ?).
+- FX, RayCast and DialogBox were translated from the code and checked visually, not compared frame
+  by frame with the running simulator. The rotation direction of doRotazoom and the handedness of
+  the ray caster follow the arithmetic; a side-by-side capture against gensimu would settle them.
+- List.drawList is not called by any game in the corpus, so its port is unexercised.
+- Sms.readBits/getbits with n > 32 - (pos & 7) uses the odd 5-byte path (0x412fab); no game seen
+  reads more than 16 bits at a time.
