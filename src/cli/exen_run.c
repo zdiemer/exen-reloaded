@@ -571,7 +571,7 @@ int main(int argc, char **argv)
         char dir[1024], path[1200];
         snprintf(dir, sizeof dir, "%s", argv[0]);
         char *cut = strrchr(dir, '/'), *cut2 = strrchr(dir, '\\');
-        if (cut2 > cut)
+        if (cut2 && (!cut || cut2 > cut)) /* the later separator; never compare against NULL */
             cut = cut2;
         if (cut)
             cut[1] = 0;

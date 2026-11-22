@@ -35,6 +35,18 @@ Needs CMake 3.20 or newer and a C11 compiler. The core (`src/core/`) is plain C 
 SDL dependency. `src/core/natives_gen.h` is generated from the vendored simulator by
 `tools/gen_natives.py`; regenerate it rather than editing it.
 
+## Tests
+
+```sh
+cmake -S . -B build -G Ninja -DEXEN_BUILD_TESTS=ON && cmake --build build
+ctest --test-dir build --output-on-failure      # C unit tests: asset-free, about a second
+python -m unittest discover -s tests/python     # tool parsers, generated headers
+```
+
+The unit tests need no games (they use the vendored simulator and flash files). Corpus-level
+checks live in `tools/harness/compat.py` and `exen-run --selftest-state`. CI runs the unit tests on
+Linux, macOS and Windows, plus sanitizers and a check that generated headers are current.
+
 ## Tracking work
 
 Work is tracked in GitHub issues, labelled by area (`area:vm`, `area:natives`, `area:graphics`,

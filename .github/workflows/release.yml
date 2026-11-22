@@ -1,0 +1,141 @@
+# Release: on a version tag (v*), build exen-reloaded and exen-run for Linux, macOS and
+# Windows, package each with the README and the vendored original simulator (which both
+# frontends look for beside the executable), and publish the archives as a GitHub Release.
+# No games are packaged.
+#
+# SDL3 comes from the repo's FetchContent fallback (CMAKE_DISABLE_FIND_PACKAGE_SDL3 skips any
+# installed copy), which builds it as a static library, so the binaries are self-contained:
+# there is no SDL3 runtime library to ship. .github/scripts/package-release.sh still copies one
+# if a build ever links it dynamically.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # dry run: builds and uploads the archives as workflow artifacts only
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            shell: bash
+          - name: macos-arm64
+            os: macos-latest
+            shell: bash
+          - name: windows-x86_64
+            os: windows-latest
+            shell: msys2 {0}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MSYS2 toolchain (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            git
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # Ninja, plus the headers SDL3 needs for its X11/Wayland/audio backends. SDL loads
+          # those libraries at run time, so the binary still runs without them installed.
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build pkg-config \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
+            libxss-dev libxtst-dev libxkbcommon-dev libdrm-dev libgbm-dev \
+            libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
+            libdbus-1-dev libibus-1.0-dev libudev-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Package name
+        id: pkg
+        run: |
+          version="${GITHUB_REF_NAME}"
+          case "$GITHUB_REF" in refs/tags/*) ;; *) version="snapshot-${GITHUB_SHA::8}" ;; esac
+          echo "name=exen-reloaded-${version}-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+
+      # Windows: -static also links libgcc and winpthread statically (no MinGW DLLs needed).
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=ON
+          -DEXEN_FETCH_SDL=ON
+          -DEXEN_BUILD_TESTS=ON
+          ${{ runner.os == 'macOS' && '-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0' || '' }}
+          ${{ runner.os == 'Windows' && '-DCMAKE_EXE_LINKER_FLAGS=-static' || '' }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Unit tests
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: ctest --test-dir build --output-on-failure --timeout 300
+
+      - name: Package
+        run: bash .github/scripts/package-release.sh build dist "${{ steps.pkg.outputs.name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its assets
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            # tags with a pre-release suffix (v1.0.0-rc1) become pre-releases
+            pre=""
+            case "$tag" in *-*) pre="--prerelease" ;; esac
+            gh release create "$tag" dist/* --title "exen-reloaded $tag" --generate-notes $pre
+          fi

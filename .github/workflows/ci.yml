@@ -1,0 +1,181 @@
+# Continuous integration: build everything (core, exen-run, SDL3 frontend) on Linux, macOS and
+# Windows, run the unit tests (CTest) and the Python tool tests, check that the generated
+# headers are up to date, and run the unit tests under ASan/UBSan.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu has no SDL3 package yet: build it from source into a cached prefix.
+          - name: Linux
+            os: ubuntu-latest
+            shell: bash
+          # SDL3 from Homebrew.
+          - name: macOS
+            os: macos-latest
+            shell: bash
+          # MSYS2 MINGW64 (GCC), SDL3 from the MSYS2 package. Same toolchain as development.
+          - name: Windows
+            os: windows-latest
+            shell: msys2 {0}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------- toolchains and SDL3
+      - name: Install MSYS2 toolchain (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-sdl3
+            mingw-w64-x86_64-python
+
+      - name: Set up Python (Linux, macOS)
+        if: runner.os != 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja sdl3
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix)" >> "$GITHUB_ENV"
+
+      # The SDL3 version is the GIT_TAG of the FetchContent fallback in CMakeLists.txt.
+      - name: SDL3 version
+        if: runner.os == 'Linux'
+        id: sdl
+        run: echo "tag=$(sed -n 's/.*GIT_TAG \(release-[0-9.]*\).*/\1/p' CMakeLists.txt | head -n 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache SDL3 (Linux)
+        if: runner.os == 'Linux'
+        id: sdl-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/sdl3
+          key: sdl3-${{ steps.sdl.outputs.tag }}-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Build SDL3 (Linux, cache miss)
+        if: runner.os == 'Linux' && steps.sdl-cache.outputs.cache-hit != 'true'
+        run: |
+          # the headers SDL3 needs for its X11/Wayland/audio backends
+          # (https://wiki.libsdl.org/SDL3/README-linux#build-dependencies)
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
+            libxss-dev libxtst-dev libxkbcommon-dev libdrm-dev libgbm-dev \
+            libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
+            libdbus-1-dev libibus-1.0-dev libudev-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev
+          bash .github/scripts/build-sdl3.sh "$HOME/sdl3"
+
+      - name: Use the cached SDL3 (Linux)
+        if: runner.os == 'Linux'
+        run: echo "CMAKE_PREFIX_PATH=$HOME/sdl3" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------- build and test
+      # EXEN_FETCH_SDL=OFF: SDL3 must come from the package or the cached prefix above, so a
+      # broken SDL3 setup fails here instead of silently building SDL from source.
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DEXEN_BUILD_TESTS=ON
+          -DEXEN_FETCH_SDL=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Check that the SDL frontend was built
+        run: test -f build/exen-reloaded || test -f build/exen-reloaded.exe
+
+      - name: Unit tests (CTest)
+        env:
+          # tests that touch SDL must not need a display or an audio device
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: ctest --test-dir build --output-on-failure --timeout 300
+
+      - name: Python tool tests
+        run: python -m unittest discover -s tests/python -v
+
+  generated:
+    name: Generated headers are up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Regenerate natives_gen.h and gamedb_gen.h
+        run: |
+          python tools/gen_natives.py
+          python tools/gen_gamedb.py
+      - name: Compare with the committed files
+        run: |
+          if ! git diff --exit-code -- src/core/natives_gen.h src/core/gamedb_gen.h; then
+            echo "::error::Generated headers are stale. Run 'python tools/gen_natives.py' and 'python tools/gen_gamedb.py' and commit the result."
+            exit 1
+          fi
+
+  sanitizers:
+    name: Unit tests under ASan and UBSan (Linux, Clang)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build
+      # ASan in the LLVM shipped with Ubuntu 24.04 can crash at start-up with the kernel's
+      # default 32 bits of mmap randomisation.
+      - name: Limit ASLR entropy for ASan
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      # Core, exen-run and the unit tests only; SDL is not needed here.
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_BUILD_TYPE=Debug
+          -DEXEN_BUILD_SDL=OFF
+          -DEXEN_BUILD_TESTS=ON
+          "-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Unit tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ctest --test-dir build --output-on-failure --timeout 300
