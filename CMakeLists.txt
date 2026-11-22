@@ -14,15 +14,22 @@ endif()
 add_library(exen_core STATIC
   src/core/api.c
   src/core/codec.c
+  src/core/extnatives.c
+  src/core/fx.c
   src/core/graphics.c
   src/core/hash.c
   src/core/heap.c
   src/core/interp.c
   src/core/loader.c
+  src/core/melody.c
   src/core/natives.c
   src/core/platform.c
   src/core/playfield.c
+  src/core/raycast.c
   src/core/resource.c
+  src/core/sms.c
+  src/core/ui.c
+  src/core/vec3d.c
 )
 target_include_directories(exen_core PUBLIC src/core)
 

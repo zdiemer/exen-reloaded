@@ -1,44 +1,110 @@
-/* exen.FX natives 103..108 (all static). ABI: see Resource.c.txt; EXimg: see AnimBitmap.c.txt.
+/* exen.FX natives 103..108 (all static). ABI: see Resource.c.txt; EXimg: see eximg_common.c.txt.
+ * Read instruction by instruction from gensimu.exe; the port is src/core/fx.c. Confidence: high.
+ *
  * Each wrapper resolves  dst = img_struct(g.pixIma)  and  src = img_struct(image), and calls an
- * entry of dst->ops->fx (ops+0x40) as  fx[k](src, dst, ...).
- *   8-bit vtable: fx table = 0x456018 (installed lazily by 0x42bb30 via 0x415b60).
- *   1-bit vtable: fx table = *(0x457f48) = 0x457ef0, whose first six entries (0x42d489..0x42d4a2)
- *   are EMPTY functions  =>  every FX effect is a silent no-op on 1-bit (monochrome) profiles.
- *   (4-bit gray is not a separate vtable in gensimu as far as seen; conf medium.)
- * All FX implementations below are 8-bit only, copy raw palette indices (no transparency, no paint
- * mode). Rotazoom and mosaic do NOT call sync_clip (Graphics clip ignored; they clamp to the image);
- * shift/shutter call sync_clip first and honour dst clip (+0x18..+0x24).
- * Confidence: wrappers high; inner algorithms medium/low (sketched, not line-by-line).
+ * entry of the SOURCE image's ops->fx table (src->ops+0x40) as  fx[k](src, dst, ...).
+ *   8-bit table: fx = 0x456018 (installed lazily by 0x42bb30 via 0x415b60):
+ *     0x415b6a rotazoom, 0x415fc6 mosaic, 0x4162d0 shutterV, 0x416715 shutterH,
+ *     0x41688d shiftH, 0x416b75 shiftV
+ *   4-bit table: fx = *(0x457f48) = 0x457ef0, whose entries are EMPTY functions, so every FX on a
+ *   4bpp source is a silent no-op.
+ * A null image (either one) logs and is a fatal interrupt 0 (0x407a13(0)); the shifts also
+ * check the offsets array the same way.
+ * Rotazoom and mosaic do NOT call sync_clip and ignore the clip. Shutters and shifts call
+ * sync_clip(g, dst) first. Every effect copies raw bytes: no palette LUT, no transparency, no
+ * paint mode. EXimg fields used: data +0, w +4, h +8, pitch +0x14, clipX..clipH +0x18..+0x24.
  */
 
-/* 103 doRotazoom(Graphics g, Image img, int angle, int zoom, int cx, int cy)V @0x424b70 -> fx[0]=0x415b6a
- *   s = sin(angle), c = cos(angle) via 0x41c972/0x41c956 (exen.Math tables);
- *   z = (zoom + 0x10000) >> 8      (zoom is 16.16 *added* to 1.0, i.e. 0 = 1:1);
- *   builds an inverse-mapping walker (start u,v and du,dv per x/y, 16.16) centred on the dst centre
- *   offset by (cx, cy), over the whole dst image; samples src nearest-neighbour.
- *   If src width and height are powers of two (0x41c928) -> 0x415d19 (coordinates wrap with masks,
- *   i.e. the source tiles infinitely), else 0x415e5d (out-of-range samples skipped). */
+/* 103 doRotazoom(g, img, angle, zoom, cx, cy) @0x424b70 -> 0x415b6a */
+c = cos(angle); s = sin(angle);                 /* exen.Math 2048-unit tables, 16.16 */
+z = (zoom + 0x10000) >> 8;                       /* zoom is added to 1.0: >0 shrinks, <0 magnifies */
+c = (c >> 8) * z;  s = (s >> 8) * z;
+hh = (-D.h) / 2;  hw = (-D.w) / 2;              /* truncating */
+U = (cx + (S.w >> 1) + 2*S.w) * 0xffff;          /* 0xffff, not 0x10000 (centre off by ~1 px) */
+V = (cy + (S.h >> 1) + 2*S.h) * 0xffff;
+u0 = hh*s + hw*c + U;   v0 = hh*c - (hw*s - V);
+/* walker {s, c, D.h, D.pitch, u0, v0, z, S.pitch, S.w, S.h, S.data, D.data}; if S.w and S.h are
+ * powers of two (0x41c928) -> 0x415d19 with masks w-1/h-1, else 0x415e5d. BOTH tile: */
+for (row = D.h; row > 0; row--) {               /* the whole destination, rows of D.pitch bytes */
+    u = u0; v = v0; u0 += s; v0 += c;
+    for (n = D.pitch; n > 0; n--) {
+        x = u >> 16; y = v >> 16;
+        pow2: x &= S.w-1; y &= S.h-1;            /* 0x415d19 */
+        else: while (x >= S.w) x -= S.w; while (y >= S.h) y -= S.h;
+              while (x < 0) x += S.w; while (y < 0) y += S.h;   /* 0x415e5d */
+        u += c; v -= s;
+        *dst++ = S.data[y * S.w + x];            /* row stride is the WIDTH, not the pitch */
+    }
+}
 
-/* 104 doMosaic(Graphics g, Image img, int x, int y, int level)V @0x424bfd -> fx[1]=0x415fc6
- *   Requires level >= 16 and |x| <= dst.w, |y| <= dst.h, else nothing. Copies src into dst at (x,y)
- *   (negative x/y clamped to 0, size clamped to dst) with nearest-neighbour sampling whose source
- *   step is quantised so that each source sample is replicated over ~level/16 pixels (16 = plain copy,
- *   bigger = coarser blocks), centred.  conf low on the exact block arithmetic (4.12 fixed point). */
+/* 104 doMosaic(g, img, x, y, level) @0x424bfd -> 0x415fc6 */
+W = min(S.w - |x|, D.w);  dskip = D.pitch - W;
+if (level < 16 || |x| > D.w || |y| > D.h) return;
+du = ((S.w << 16) / level) / S.w;   dv = ((S.h << 16) / level) / S.h;      /* 4.12 steps */
+U = (du * S.w) >> 12;   V = (dv * S.h) >> 12;
+ex = ((S.w << 16) * (level - 16) / S.w) >> 8;   ey = likewise with h;
+U = (S.w - (U + ((U * ex) >> 12))) << 11;       V = (S.h - (V + ((V * ey) >> 12))) << 11;
+H = min(S.h - |y|, D.h);  if (y < 0) y = 0;  if (x < 0) x = 0;
+d = D.data + x + y*D.pitch;
+while (H--) {
+    u = U; acc = 0; row = S.data + (V >> 12) * S.pitch;
+    for (n = W; n; n--) { *d++ = row[u >> 12]; u += du; acc += du; if (acc >> 12) { u += ex; acc &= 0xfff; } }
+    d += dskip;  V += dv;  ay += dv;  if (ay >> 12) { V += ey; ay &= 0xfff; }
+}
 
-/* 105 doShiftHorizontal(Graphics g, Image img, int x, int y, byte[] offsets)V @0x424c84 -> fx[4]=0x41688d
- *   null offsets -> log "pointer array of offset is null" + throw_internal(0).
- *   For each row r of the (clipped) copy: memcpy src row r into dst row (y+r) shifted horizontally by
- *   (s8)offsets[r] + x, clipped to dst clip.  Pointer and length of the array are passed, but the
- *   implementation reads one byte per row WITHOUT checking the array length (OOB if rows > length). */
+/* 105 doShiftHorizontal(g, img, x, y, byte[] offs) @0x424c84 -> 0x41688d(src, dst, x, y, offs, len) */
+W = min(S.w, D.clipW);  H = min(S.h, D.clipH);
+if (y + D.clipY < D.clipY) {                    /* y < 0 */
+    if (y < D.clipY) y = -y;
+    sp = S.data + y*S.pitch;  dp = D.data + D.clipY*D.pitch;
+    H = min(S.clipH - y, D.clipH);              /* the SOURCE image's stored clip height */
+} else {
+    sp = S.data;  dp = D.data + (D.clipY + y)*D.pitch;
+    H = min(S.clipH, D.clipH - y);
+}
+if (|x| > D.w || y > D.h) return;
+if (H > S.h) H = S.h;
+dp += D.clipX;
+for (r = 0; r < H; r++) {                       /* one offset byte per row, length not checked */
+    o = (s8)*offs++ + x;  n = W;
+    if (o > 0) { t = D.w - (o + n); if (t < 0) n += t; if (o + n > D.clipW) n = D.clipW - o;
+                 if (n > 0) memcpy(dp + o, sp, n); }
+    else       { n += o; if (n > D.clipW) n = D.clipW; if (n > 0) memcpy(dp, sp - o, n); }
+    sp += S.pitch;  dp += D.pitch;
+}
 
-/* 106 doShiftVertical(Graphics g, Image img, int x, int y, byte[] offsets)V @0x424d62 -> fx[5]=0x416b75
- *   Same per column (each column shifted vertically by offsets[col] + y).  conf medium */
+/* 106 doShiftVertical(g, img, x, y, byte[] offs) @0x424d62 -> 0x416b75 */
+if (x < 0) { x = -x; s0 = S.data + x; N = min(S.clipW - x, D.clipW); dx = D.clipX; start = x; }
+else       { s0 = S.data;     N = min(S.clipW, D.clipW - x);  dx = D.clipX + x; start = 0; }
+for (c = start; c < N + start; c++) {           /* quirk: with x < 0 the source starts at 2|x| */
+    o = (s8)*offs++ + D.clipY + y;
+    s = s0 + c;  d = D.data + c + dx;
+    if (o > D.clipY) { d += o*D.pitch;        n = min(S.h, D.clipH - o + D.clipY); }
+    else             { d += D.clipY*D.pitch;  s -= (o - D.clipY)*S.pitch;  n = min(S.h + (o - D.clipY), D.clipH); }
+    for (k = 0; k < n; k++) { *d = *s; s += S.pitch; d += D.pitch; }
+}
 
-/* 107 doShutterVertical(Graphics g, Image img, int step, boolean dir)V @0x424e40 -> fx[2]=0x4162d0
- *   Processes the image in groups of 8 columns; 0x4165f5 fills a 64-entry table from (ncols/8, step,
- *   dir) giving, per group, how many columns of the group are revealed; revealed columns are copied
- *   src->dst (columns copied pixel by pixel down the image, size = min(src, dst clip)). Used for
- *   "venetian blind" transitions driven by `step` over successive frames.  conf low */
+/* revealed lines per group of 8, 0x4165f5(tab, n, step, dir); a decreases by 0x40 per group */
+a = step;
+if (dir == 0) { a += 0x200; each: a < 0x200 ? 8 : a < 0x600 ? (max(sin(a),0)*9)>>16 : 0; }
+else          {             each: a < 0x200 ? (max(sin(a),0)*9)>>16 : 8; }
 
-/* 108 doShutterHorizontal(Graphics g, Image img, int step, boolean dir)V @0x424ed2 -> fx[3]=0x416715
- *   Row-wise counterpart of 107.  conf low */
+/* 107 doShutterVertical(g, img, step, dir) @0x424e40 -> 0x4162d0 */
+W = min(S.w, D.clipW);  H = min(S.h, D.clipH);  G = W >> 3;  rem = W - 8*G;
+tab[64] = {0}; table(tab, G, step, dir);         /* the table lives in 64 stack ints */
+sp = S.data; dp = D.data; s = d = NULL;          /* from the data origin, not the clip origin */
+while (G-- > 0) {
+    s = sp; d = dp; sp += 8; dp += 8;
+    for (k = tab[i++ & 63]; k > 0; k--) {        /* reveal k columns of the group */
+        for (r = H; r > 0; r--) { *d = *s; s += S.pitch; d += D.pitch; }
+        s -= H*S.pitch - 1;  d -= H*D.pitch - 1;
+    }
+}
+if (rem) for (k = tab[i] - rem; k > 0; k--) ... /* continues from s/d; tab[i] is 0 unless G>=64 */
+
+/* 108 doShutterHorizontal(g, img, step, dir) @0x424ed2 -> 0x416715 */
+G = S.h / 8; table(tab, G, step, dir);           /* no clipping at all */
+for (g = 0; g < G; g++) {
+    s = S.data + g*8*S.pitch;  d = D.data + g*8*D.pitch;
+    for (k = tab[g]; k; k--) { memcpy(d, s, S.pitch); s += S.pitch; d += D.pitch; }
+}

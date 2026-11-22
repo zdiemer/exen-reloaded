@@ -1,56 +1,68 @@
 // Melody player of gensimu.exe. Decompiled by hand from 0x43b192 (start), 0x43ad57 (timer proc),
-// 0x43b259 (stop) and 0x43ac4e (volume). Confidence: high for the control flow, medium for 0x85.
-// WIN32: midiOut*, SetTimer/KillTimer. Replace these with a portable synth/MIDI sink and a scheduler.
+// 0x43b259 (stop) and 0x43ac4e (volume). Re-checked instruction by instruction for issue #16
+// (2026-11). Confidence: high, including 0x85.
+// WIN32: midiOut*, SetTimer/KillTimer. The port (src/core/melody.c) replaces them with a
+// synthesizer and a countdown on the audio clock.
 // Globals: mel_ptr 0x519fe0, mel_size 0x519fe4, hmidi 0x519fe8, cur_dur 0x519fec,
 //          ev_count 0x4c658c, shortmsg 0x4c6590, prev 0x4c6594 (u16), ch 0x4c6596 (u8),
-//          period 0x4c6598, tempo 0x45caac (=120), need_open 0x45cab0.
+//          period 0x4c6598, tempo 0x45caac (=120, read once at 0x43b148, never written),
+//          need_open 0x45cab0 (=1, never cleared). Timer id 10 on the main window [0x4a20a8].
 
 static const uint8_t dur[14] = {0xc0,0x80,0x60,0x40,0x30,0x20,0x18,0x10,0x0c,8,6,4,3,2};
+// 1/32-beat units: odd index = whole, half, quarter, 1/8, 1/16, 1/32, 1/64; even = dotted.
 
-int melody_start(uint8_t *mel, uint32_t size) {        // 0x43b192, via EXManufMelodyPlay 0x434790
+// EXManufMelodyPlay 0x434790 <- 0x406601 <- Gamelet.playMelody 0x425252, which only calls it when
+// EEPROM byte cfg+0x15c is nonzero, with size = the u16 length of the byte[] (= bytes).
+void melody_start(uint8_t *mel, uint32_t size) {        // 0x43b192
     mel_ptr = mel;
-    if (need_open) {                          // the flag starts at 1 and is never cleared, so
-        if (midiOutOpen(&hmidi, 0, 0, 0, 0) == 1 /*MMSYSERR_ERROR*/) return;   // the device is
-        need_open = 1;                        // re-opened on every play (stop closes it again)
+    if (need_open) {                          // always true: the device is re-opened on every play
+        if (midiOutOpen(&hmidi, 0, 0, 0, 0) == 1 /*MMSYSERR_ERROR*/) return;
+        need_open = 1;
     }
-    mel_size = size;          // = byte length of the Java byte[]
+    mel_size = size;
     ev_count = 0;
     midiOutSetVolume(hmidi, 0x80808080);
     prev = 0xffff;
-    SetTimer(hwnd, 10, 10, melody_tick);
+    // `ch` is NOT reset: a channel set by an earlier melody persists.
+    SetTimer(hwnd, 10, 0, melody_tick);       // elapse 0 -> USER_TIMER_MINIMUM = 10 ms
 }
 
+// A periodic timer: if a firing does not call SetTimer, the next one comes after the same period.
 void CALLBACK melody_tick(HWND, UINT, UINT_PTR, DWORD) {   // 0x43ad57
-    if (prev >= 1) {                         // note-off for the previous note (prev==0xffff on the first tick, also >=1)
-        cur_dur = dur[mel_ptr[1] % 14];      // (recomputed from the *current* pair, unused here)
-        shortmsg = (0x80 | ch) | (prev << 8);
+    if (prev >= 1) {                         // also true for 0xffff on the first firing
+        cur_dur = dur[mel_ptr[1] % 14];      // from the pair about to be handled
+        shortmsg = (0x80 | ch) | (prev << 8);         // note-off, velocity 0
         midiOutShortMsg(hmidi, shortmsg);
     }
-    if (++ev_count >= mel_size) return;      // NOTE: counts events and compares with the byte length
+    if (++ev_count >= mel_size) return;      // counts events against the *byte* length
     prev = mel_ptr[0];
     if (prev > 0x7f) {                       // command
         uint8_t b = mel_ptr[1];
         cur_dur = 0;
-        switch (prev - 0x80) {
+        switch (prev - 0x80) {               // jump table 0x43b17a, 0x86..0xff fall through
         case 0: ch = b & 0x0f; break;                                         // 0x80 set channel
         case 1: if (b == 0) { ch = 9; midiOutShortMsg(hmidi, 0xC0 | ch); }    // 0x81 program
                 else if (b <= 0x80) midiOutShortMsg(hmidi, 0x4000C0 | ch | (b << 8));
                 break;
-        case 2: cur_dur = dur[b % 14]; break;                                 // 0x82 rest (see below)
+        case 2: cur_dur = dur[b % 14]; break;                                 // 0x82 "rest"
         case 3: period = 1875 / b; SetTimer(hwnd, 10, period, melody_tick); break; // 0x83 retime
-        case 4: set_volume(b); break;                                         // 0x84 volume, 0x43ac4e
-        case 5: /* balance: midiOutGetVolume, then move L or R byte depending on b >= 0x80 */ break;
+        case 4: set_volume(b); break;                                         // 0x84 volume
+        case 5: set_balance(b); break;                                        // 0x85 balance
         }
-        if (prev != 0x82) { mel_ptr += 2; melody_tick(...); }   // process the next pair immediately
-        return;                                                  // 0x82: wait for the next tick
+        if (prev != 0x82) { mel_ptr += 2; melody_tick(...); }   // next pair at once
+        return;
+        // 0x82: mel_ptr is not advanced and the timer is not re-armed, so each later firing
+        // re-reads this same pair (note-off of "note" 0x82, count, case 2 again) until ev_count
+        // reaches mel_size. The melody never continues past a 0x82: it ends silently.
+        // 0x83: always overridden by the next note's SetTimer below (or the melody ends).
     }
     if (prev == 0) {                         // end marker
         if (mel_size > 2) { need_open = 1; melody_stop(); }
-        return;
+        return;                              // size <= 2: timer keeps firing, nothing happens
     }
     midiOutShortMsg(hmidi, (0x90 | ch) | (prev << 8) | (0x40 << 16));    // note-on, velocity 64
     mel_ptr += 2;
-    period = (1875 / tempo) * cur_dur;       // 1875/120 = 15 (integer) -> 15 ms per duration unit
+    period = (1875 / tempo) * cur_dur;       // 1875/120 = 15 (integer) -> 15 ms per unit
     SetTimer(hwnd, 10, period, melody_tick);
 }
 
@@ -62,14 +74,29 @@ void melody_stop(void) {                     // 0x43b259, via EXManufMelodyStop 
     need_open = 1;
 }
 
-void set_volume(uint8_t v) {                 // 0x43ac4e, also EXManufSetVolume
+void set_volume(uint8_t v) {                 // 0x43ac4e, also EXManufSetVolume 0x4347d2
     DWORD cur; midiOutGetVolume(hmidi, &cur);
-    // if left byte == right byte: set all four bytes to v (0xvvvvvvvv); else keep the
-    // channel layout and set only the channel(s) that were nonzero.
-    midiOutSetVolume(hmidi, ...);
+    DWORD l = cur & 0xff00, r = cur & 0xff000000;   // high bytes of the left / right words
+    if ((l << 16) == r) cur = v << 24 | v << 16 | v << 8 | v;   // balanced: both = v
+    else if (l)        cur = v << 8 | v;                         // left only, right = 0
+    else               cur = v << 24 | v << 16;                  // right only, left = 0
+    midiOutSetVolume(hmidi, cur);
 }
 
-// Durations at tempo 120: unit = 15 ms, so dur 0xc0 = 2880 ms (whole note?), 0x30 = 720 ms, 2 = 30 ms.
-// Note: cur_dur used for a note is the value left by the *previous* call's first branch
-// (dur[next_pair.b % 14]), so in effect each note's length comes from its own b byte, because the
-// note-off step at the top recomputes it from mel_ptr[1] before the note is handled.
+void set_balance(uint8_t b) {                // inline in 0x43ad57 (0x43af92)
+    DWORD cur; midiOutGetVolume(hmidi, &cur);
+    DWORD t;
+    if (b != 0x80) {
+        if (b < 0x80) { t = (cur & 0xff000000) >> 16; cur &= 0x00ffffff; }  // right hi -> left hi
+        else          { t = (cur & 0x0000ff00) << 16; cur &= 0xffff00ff; }  // left hi -> right hi
+    } else {
+        t = cur & 0xff000000;
+        t = t == 0 ? (cur & 0xff00) << 16 : t >> 16;  // centre: copy into the silent side, or OR
+    }
+    midiOutSetVolume(hmidi, cur | t);
+}
+
+// Timing at tempo 120: unit = 15 ms; dur 0x80 (whole) = 1920 ms, 0x20 (quarter) = 480 ms,
+// 0x10 (1/8) = 240 ms, 2 (1/64) = 30 ms. The first event follows playMelody by 10 ms.
+// A note sounds from its firing until the next firing (note-off then the next note-on in the
+// same callback): legato, one note at a time.

@@ -4,7 +4,8 @@
  *
  * Boots the game and delivers N timer ticks on a virtual clock (no sleeping), then prints a
  * report: frames presented, timer period, halt reason, and native-call counts with the
- * unimplemented ones flagged. Frames can be dumped as PNG and key presses scripted (--help).
+ * unimplemented ones flagged. Frames can be dumped as PNG, the audio rendered to a WAV file in
+ * step with the virtual clock, and key presses scripted (--help).
  * The compatibility harness builds on this.
  */
 #include <stdio.h>
@@ -26,6 +27,7 @@ typedef struct {
     const char *dump_dir;
     int dump_every, scale;
     int melodies;
+    int log_melodies;
 } Run;
 
 static void on_present(void *u, const uint8_t *px, int w, int h)
@@ -41,8 +43,23 @@ static void on_present(void *u, const uint8_t *px, int w, int h)
 }
 static void on_timer(void *u, int ms) { ((Run *)u)->period = ms; }
 static uint32_t on_ticks(void *u) { return ((Run *)u)->now_ms; }
-static void on_melody(void *u, const uint8_t *d, int n) { (void)d; (void)n; ((Run *)u)->melodies++; }
-static void on_melody_stop(void *u) { (void)u; }
+static void on_melody(void *u, const uint8_t *d, int n)
+{
+    Run *r = u;
+    r->melodies++;
+    if (r->log_melodies) {
+        printf("melody t=%u ms, %d bytes:", r->now_ms, n);
+        for (int i = 0; i < n; i++)
+            printf(" %02x", d[i]);
+        printf("\n");
+    }
+}
+static void on_melody_stop(void *u)
+{
+    Run *r = u;
+    if (r->log_melodies)
+        printf("melody stop t=%u ms\n", r->now_ms);
+}
 static void on_log(void *u, const char *m)
 {
     if (!((Run *)u)->quiet)
@@ -65,6 +82,53 @@ static uint8_t *slurp(const char *path, size_t *len)
     fclose(f);
     *len = (size_t)n;
     return b;
+}
+
+/* WAV output: 16-bit stereo PCM. The sizes are patched in when the file is closed. */
+typedef struct {
+    FILE *f;
+    uint32_t frames;
+    int rate;
+    int16_t buf[2 * 4096];
+} Wav;
+
+static void put32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static void wav_header(Wav *w)
+{
+    uint8_t h[44] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E', 'f', 'm', 't', ' ',
+                     16, 0, 0, 0, 1, 0, 2, 0, /* PCM, 2 channels */
+                     0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 16, 0, 'd', 'a', 't', 'a'};
+    uint32_t bytes = w->frames * 4u;
+    put32(h + 4, 36 + bytes);
+    put32(h + 24, (uint32_t)w->rate);
+    put32(h + 28, (uint32_t)w->rate * 4u);
+    put32(h + 40, bytes);
+    fseek(w->f, 0, SEEK_SET);
+    fwrite(h, 1, sizeof h, w->f);
+    fseek(w->f, 0, SEEK_END);
+}
+
+/* Render the audio up to virtual time `ms`. */
+static void wav_render_to(Wav *w, ExenVM *vm, uint32_t ms)
+{
+    uint64_t target = (uint64_t)ms * (uint64_t)w->rate / 1000u;
+    while (w->frames < target) {
+        uint64_t n = target - w->frames;
+        if (n > 4096)
+            n = 4096;
+        exen_audio_render(vm, w->buf, (int)n);
+        uint8_t le[4 * 4096];
+        for (uint64_t i = 0; i < 2 * n; i++) {
+            le[2 * i] = (uint8_t)w->buf[i];
+            le[2 * i + 1] = (uint8_t)((uint16_t)w->buf[i] >> 8);
+        }
+        fwrite(le, 4, (size_t)n, w->f);
+        w->frames += (uint32_t)n;
+    }
 }
 
 /* Scripted input: "tick:key[/hold]" items separated by commas. */
@@ -138,12 +202,18 @@ static void usage(void)
             "                    fire (up/down/left/right/fire send 2/8/4/6/5, as gensimu maps\n"
             "                    the arrow keys), pad-up pad-down pad-left pad-right, or a\n"
             "                    number. Example: --keys \"20:ok,40:down/3,60:ok\"\n"
+            "  --wav FILE        render the game's audio to FILE (16-bit stereo WAV) in step\n"
+            "                    with the virtual clock\n"
+            "  --rate HZ         audio sample rate (default 44100)\n"
+            "  --melodies        print each melody the game starts (time and bytes)\n"
             "  --quiet           no VM log\n");
 }
 
 int main(int argc, char **argv)
 {
-    const char *sim = "vendor/gensimu/gensimu.exe", *game = NULL, *eeprom = NULL;
+    const char *sim = "vendor/gensimu/gensimu.exe", *game = NULL, *eeprom = NULL, *wav_path = NULL;
+    static Wav wav;
+    wav.rate = 44100;
     int frames = 300, sw = 0, sh = 0;
     Run run = {0};
     run.period = -1;
@@ -155,6 +225,9 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--sim") && i + 1 < argc) sim = argv[++i];
         else if (!strcmp(argv[i], "--quiet")) run.quiet = 1;
+        else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
+        else if (!strcmp(argv[i], "--rate") && i + 1 < argc) wav.rate = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--melodies")) run.log_melodies = 1;
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) run.dump_dir = argv[++i];
         else if (!strcmp(argv[i], "--dump-every") && i + 1 < argc) run.dump_every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) run.scale = atoi(argv[++i]);
@@ -195,6 +268,7 @@ int main(int argc, char **argv)
     ExenConfig cfg = {0};
     cfg.screen_width = sw;
     cfg.screen_height = sh;
+    cfg.audio_rate = wav.rate;
     cfg.host = (ExenHost){&run, on_present, on_timer, on_ticks, on_melody, on_melody_stop, on_log};
     ExenVM *vm = exen_create(&cfg);
     if (!vm || exen_load_framework(vm, simb, sl) < 0 || exen_load_game(vm, gameb, gl) < 0) {
@@ -211,6 +285,15 @@ int main(int argc, char **argv)
         memcpy(exen_eeprom(vm), eb, el < 2048 ? el : 2048);
         free(eb);
     }
+    if (wav_path) {
+        wav.rate = exen_audio_rate(vm);
+        wav.f = fopen(wav_path, "wb");
+        if (!wav.f) {
+            fprintf(stderr, "cannot write %s\n", wav_path);
+            return 2;
+        }
+        wav_header(&wav);
+    }
     int rc = exen_boot(vm);
     int ticks = 0;
     for (; rc == 0 && ticks < frames && !exen_halted(vm); ticks++) {
@@ -224,10 +307,21 @@ int main(int argc, char **argv)
         if (rc != 0 || exen_halted(vm))
             break;
         run.now_ms += run.period > 0 ? (uint32_t)run.period : 100;
+        if (wav.f) /* the audio up to this tick, which plays what earlier events started */
+            wav_render_to(&wav, vm, run.now_ms);
         rc = exen_tick(vm);
+    }
+    if (wav.f) {
+        /* one more period, so that what the last tick started is heard */
+        wav_render_to(&wav, vm, run.now_ms + (run.period > 0 ? (uint32_t)run.period : 100));
+        wav_header(&wav);
+        fclose(wav.f);
     }
     printf("game: %s\nticks: %d  frames presented: %d  timer period: %d ms  melodies: %d\n", game,
            ticks, run.frames, run.period, run.melodies);
+    if (wav_path)
+        printf("audio: %s, %u frames at %d Hz (%.1f s)\n", wav_path, wav.frames, wav.rate,
+               (double)wav.frames / wav.rate);
     printf("status: %s\n", exen_halted(vm) ? exen_error(vm) : "running");
     printf("natives called:\n");
     for (int i = 0; i < 256; i++) {

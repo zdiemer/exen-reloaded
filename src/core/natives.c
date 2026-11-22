@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "extnatives.h"
 #include "natives.h"
 
 /* ------------------------------------------------------------ helpers */
@@ -549,6 +550,10 @@ static int32_t isqrt_(int32_t x)
     }
     return (int32_t)r;
 }
+
+int exen_cos(ExenVM *vm, int a) { return cos_(vm, a); }
+int exen_sin(ExenVM *vm, int a) { return sin_(vm, a); }
+int32_t exen_isqrt(int32_t x) { return isqrt_(x); }
 
 static int n_Math_sin(ExenVM *vm, uint32_t *a) { a[0] = (uint32_t)sin_(vm, (int32_t)a[0]); return 1; }
 static int n_Math_cos(ExenVM *vm, uint32_t *a) { a[0] = (uint32_t)cos_(vm, (int32_t)a[0]); return 1; }
