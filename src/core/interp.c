@@ -729,7 +729,9 @@ static void run(ExenVM *vm)
             for (int i = 0; i < nd; i++)
                 if (dims[i] < 0)
                     THROW(H_NEGSIZE);
-            ref_t a = build_multi(vm, tw, ecls, dims, nd);
+            /* tw is the full array type (int[][] = 0x0259), so the outermost array's elements
+             * are tw - 0x100 (seen in Reversi and Age of Empires) */
+            ref_t a = build_multi(vm, (uint16_t)(tw - 0x100), ecls, dims, nd);
             if (!a)
                 THROW(H_OOM);
             PUSH(a);
