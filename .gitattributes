@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.exe binary
+*.exn binary
+*.dat binary
+*.png binary
+*.ini -text
