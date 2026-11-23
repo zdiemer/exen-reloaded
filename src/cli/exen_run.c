@@ -258,8 +258,12 @@ static void usage(void)
             "  --wav FILE        render the game's audio to FILE (16-bit stereo WAV) in step\n"
             "                    with the virtual clock\n"
             "  --rate HZ         audio sample rate (default 44100)\n"
-            "  --voice V         melody voice: ringtone (default) or piano (like the GM piano\n"
-            "                    the original simulator played)\n"
+            "  --voice V         melody voice: ringtone (default) or gm (General MIDI, like the\n"
+            "                    2003 simulator; \"piano\" is accepted for gm)\n"
+            "  --soundfont PATH  General MIDI SoundFont (.sf2) for the gm voice. Default, with\n"
+            "                    --voice gm: TimGM6mb.sf2 in soundfont/ beside the program or\n"
+            "                    beside it, else vendor/soundfont/. \"none\": the gm voice's\n"
+            "                    procedural piano (its fallback without a SoundFont)\n"
             "  --melodies        print each melody the game starts (time and bytes)\n"
             "  --save-at N FILE  write a save state to FILE just before tick N\n"
             "  --load FILE       resume from a state written by --save-at instead of booting;\n"
@@ -267,8 +271,9 @@ static void usage(void)
             "  --selftest-state  check that a save state round trip is exact: save before tick\n"
             "                    N (--save-at N, FILE optional; default --frames / 2), run to\n"
             "                    --frames, then load the state into a fresh VM and run again.\n"
-            "                    Frames, audio and the final state must be identical. Prints\n"
-            "                    PASS or FAIL; exit status 0 or 1.\n"
+            "                    Frames, audio and the final state must be identical (with\n"
+            "                    a SoundFont, its voices too). Prints PASS or FAIL; exit\n"
+            "                    status 0 or 1.\n"
             "  --sms MODE        SMS: server (default; the mock In-Fusio server answers),\n"
             "                    delivered (sent, never answered) or offline (not sent)\n"
             "  --sms-log         print the decoded SMS traffic (and a hex dump) on stdout\n"
@@ -276,8 +281,8 @@ static void usage(void)
 }
 
 typedef struct {
-    const uint8_t *sim, *game, *eeprom;
-    size_t sl, gl, el;
+    const uint8_t *sim, *game, *eeprom, *sf2;
+    size_t sl, gl, el, sf2l;
     int sw, sh, rate, voice;
 } Inputs;
 
@@ -306,6 +311,11 @@ static ExenVM *make_vm(const Inputs *in, Run *run)
     }
     if (in->eeprom)
         memcpy(exen_eeprom(vm), in->eeprom, in->el < EXEN_EEPROM_SIZE ? in->el : EXEN_EEPROM_SIZE);
+    if (in->sf2 && exen_audio_set_soundfont(vm, in->sf2, in->sf2l) < 0) {
+        fprintf(stderr, "the SoundFont is not a usable SoundFont 2 file\n");
+        exen_destroy(vm);
+        return NULL;
+    }
     exen_audio_set_voice(vm, in->voice);
     exen_sms_set_mode(vm, g_sms_mode);
     exen_sms_set_log(vm, g_sms_log);
@@ -516,7 +526,7 @@ static int selftest(const Inputs *in, int n, int m, const KeyEv *keys, int nkeys
 int main(int argc, char **argv)
 {
     const char *sim = NULL, *game = NULL, *eeprom = NULL, *eeprom_out = NULL, *wav_path = NULL;
-    const char *save_path = NULL, *load_path = NULL;
+    const char *save_path = NULL, *load_path = NULL, *sf_path = NULL;
     static Wav wav;
     wav.rate = 44100;
     int frames = 300, sw = 0, sh = 0, save_at = -1, self = 0, voice = EXEN_VOICE_RINGTONE;
@@ -551,13 +561,14 @@ int main(int argc, char **argv)
             const char *v = argv[++i];
             if (!strcmp(v, "ringtone"))
                 voice = EXEN_VOICE_RINGTONE;
-            else if (!strcmp(v, "piano"))
-                voice = EXEN_VOICE_PIANO;
+            else if (!strcmp(v, "gm") || !strcmp(v, "piano"))
+                voice = EXEN_VOICE_GM;
             else {
                 usage();
                 return 2;
             }
         }
+        else if (!strcmp(argv[i], "--soundfont") && i + 1 < argc) sf_path = argv[++i];
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) run.dump_dir = argv[++i];
         else if (!strcmp(argv[i], "--dump-every") && i + 1 < argc) run.dump_every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) run.scale = atoi(argv[++i]);
@@ -601,21 +612,23 @@ int main(int argc, char **argv)
         run.dump_every = 1;
     size_t sl = 0, gl = 0;
     uint8_t *simb = NULL, *gameb = slurp(game, &gl);
+    /* the executable's directory, with its separator ("" if argv[0] has none) */
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s", argv[0]);
+    char *cut = strrchr(dir, '/'), *cut2 = strrchr(dir, '\\');
+    if (cut2 && (!cut || cut2 > cut)) /* the later separator; never compare against NULL */
+        cut = cut2;
+    if (cut)
+        cut[1] = 0;
+    else
+        dir[0] = 0;
     if (sim) {
         simb = slurp(sim, &sl);
     } else {
         /* beside the executable, then the source-tree layout, then the working directory */
         static const char *rel[] = {"gensimu.exe", "../vendor/gensimu/gensimu.exe",
                                     "vendor/gensimu/gensimu.exe"};
-        char dir[1024], path[1200];
-        snprintf(dir, sizeof dir, "%s", argv[0]);
-        char *cut = strrchr(dir, '/'), *cut2 = strrchr(dir, '\\');
-        if (cut2 && (!cut || cut2 > cut)) /* the later separator; never compare against NULL */
-            cut = cut2;
-        if (cut)
-            cut[1] = 0;
-        else
-            dir[0] = 0;
+        char path[1200];
         for (int k = 0; k < 6 && !simb; k++) {
             snprintf(path, sizeof path, "%s%s", k < 3 ? dir : "", rel[k % 3]);
             simb = slurp(path, &sl);
@@ -625,6 +638,30 @@ int main(int argc, char **argv)
         fprintf(stderr, "cannot read %s\n", !gameb ? game : sim ? sim : "gensimu.exe (use --sim)");
         return 2;
     }
+    /* The SoundFont: --soundfont, or for the GM voice the shipped one if it can be found (in
+     * soundfont/ or beside the executable, the source tree, then the working directory). The
+     * ring-tone voice does not need one. */
+    size_t sfl = 0;
+    uint8_t *sfb = NULL;
+    char sf_found[1200] = "";
+    if (sf_path && strcmp(sf_path, "none")) {
+        sfb = slurp(sf_path, &sfl);
+        if (!sfb) {
+            fprintf(stderr, "cannot read %s\n", sf_path);
+            return 2;
+        }
+        snprintf(sf_found, sizeof sf_found, "%s", sf_path);
+    } else if (!sf_path && voice == EXEN_VOICE_GM) {
+        static const char *rel[] = {"soundfont/TimGM6mb.sf2", "TimGM6mb.sf2",
+                                    "../vendor/soundfont/TimGM6mb.sf2",
+                                    "vendor/soundfont/TimGM6mb.sf2"};
+        for (int k = 0; k < 8 && !sfb; k++) {
+            snprintf(sf_found, sizeof sf_found, "%s%s", k < 4 ? dir : "", rel[k % 4]);
+            sfb = slurp(sf_found, &sfl);
+        }
+        if (!sfb)
+            sf_found[0] = 0;
+    }
     ExenGameInfo gi;
     exen_game_info(gameb, gl, &gi);
     if (sw <= 0 || sh <= 0) {
@@ -633,7 +670,10 @@ int main(int argc, char **argv)
     }
     printf("title: %s (%s)\nscreen: %dx%d\n", gi.title,
            gi.match == EXEN_GAME_EXACT ? "known" : gi.match ? "known main class" : "unknown game", sw, sh);
-    Inputs in = {simb, gameb, NULL, sl, gl, 0, sw, sh, wav.rate, voice};
+    if (voice == EXEN_VOICE_GM || sfb)
+        printf("soundfont: %s\n",
+               sfb ? sf_found : "none (the General MIDI voice plays the procedural piano)");
+    Inputs in = {simb, gameb, NULL, sfb, sl, gl, 0, sfl, sw, sh, wav.rate, voice};
     uint8_t *eb = NULL;
     if (eeprom) {
         eb = slurp(eeprom, &in.el);
@@ -649,6 +689,7 @@ int main(int argc, char **argv)
         free(eb);
         free(simb);
         free(gameb);
+        free(sfb);
         return r;
     }
     ExenVM *vm = make_vm(&in, &run);
@@ -714,5 +755,6 @@ int main(int argc, char **argv)
     free(eb);
     free(simb);
     free(gameb);
+    free(sfb);
     return halted || rc != 0 ? 1 : 0;
 }

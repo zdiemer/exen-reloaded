@@ -4,3 +4,6 @@
 *.dat binary
 *.png binary
 *.ini -text
+*.sf2 binary
+# vendored unmodified, with upstream's CRLF line endings (its SHA-256 is in PROVENANCE.md)
+vendor/tinysoundfont/tsf.h -text

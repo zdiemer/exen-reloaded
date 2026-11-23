@@ -28,17 +28,23 @@ vendored unmodified (upstream commit `ae22debd`, 2026-11-21; MIT licence in its 
 
 1. Copy the core into the frontend's cores directory and `exen_reloaded_libretro.info` into its
    core info directory (in RetroArch: Settings > Directory > Cores / Core Info).
-2. Copy the system files from this repository's `vendor/gensimu/` into the frontend's system
-   directory (RetroArch: Settings > Directory > System/BIOS):
+2. Copy the system files into the frontend's system directory (RetroArch: Settings >
+   Directory > System/BIOS). In a release archive they are `gensimu.exe` and `flash/eeprom.dat`
+   at the top and `soundfont/TimGM6mb.sf2`; in this repository, `vendor/gensimu/` and
+   `vendor/soundfont/`:
 
    | File | Required | What for |
    |---|---|---|
    | `gensimu.exe` | yes | the original In-Fusio simulator; the ExEn framework classes, the math table and the font are loaded from it |
    | `flash/eeprom.dat` | no | the simulator's EEPROM defaults (nickname, currency, SMS prices) that a new save starts from |
+   | `TimGM6mb.sf2` | no | the General MIDI SoundFont for the melody voice "General MIDI (like the 2003 simulator)" (GPL-2; its licence and provenance are beside it in the archive, and in `vendor/soundfont/`). Without it that voice plays a piano approximation |
 
-   Both may also go in an `exen/` subfolder of the system directory
-   (`<system>/exen/gensimu.exe`, `<system>/exen/flash/eeprom.dat`). `eeprom.dat` is looked for
-   beside whichever `gensimu.exe` was found, as `flash/eeprom.dat` or `eeprom.dat`.
+   All of them may also go in an `exen/` subfolder of the system directory
+   (`<system>/exen/gensimu.exe`, `<system>/exen/flash/eeprom.dat`,
+   `<system>/exen/TimGM6mb.sf2`). `eeprom.dat` is looked for beside whichever `gensimu.exe` was
+   found, as `flash/eeprom.dat` or `eeprom.dat`. The SoundFont is looked for as
+   `<system>/TimGM6mb.sf2`, `<system>/exen/TimGM6mb.sf2` or `<system>/exen/soundfont/TimGM6mb.sf2`;
+   the core's log names the one it loaded.
 
    Without `gensimu.exe` the game does not load, and the frontend shows a message naming the
    paths that were tried.
@@ -78,7 +84,7 @@ button after its phone key.
 |---|---|---|
 | Screen size (`exen_screen_size`) | Auto, 101x80, 112x112, 120x143, 128x128, 128x141, 128x160, 132x176 | The handset screen the game runs on. Auto takes it from the built-in game database, or 132x176 (the simulator's default handset) for games it does not know. Takes effect when the game is restarted (Restart / `retro_reset`, or the next load); the core then updates the frontend's geometry. |
 | Sound (`exen_audio`) | enabled, disabled | Disabled mutes the output. The melodies keep running silently, so they are in time when sound comes back. Takes effect at once. |
-| Melody voice (`exen_melody_voice`) | Ring tone (`ringtone`), Piano (like the 2003 simulator) (`piano`) | Ring tone is a band-limited square wave, close to a 2003 handset. Piano approximates what the original simulator played: it sent the notes to Windows' General MIDI synth, whose default instrument is the acoustic grand piano (see README.md, Sound). Takes effect at once, with a short crossfade; the melodies keep their timing. Save states do not store the voice. |
+| Melody voice (`exen_melody_voice`) | Ring tone (`ringtone`), General MIDI (like the 2003 simulator) (`piano`) | Ring tone is a band-limited square wave, close to a 2003 handset. General MIDI is what the original simulator played: it sent the notes to Windows' General MIDI synth (the acoustic grand piano unless a melody picks another instrument); the core plays the same MIDI events from `TimGM6mb.sf2` in the system directory, or, without it, a procedural approximation of the GM piano (see README.md, Sound). The value is still called `piano`, its old name, so saved option files keep working. Takes effect at once, with a short crossfade; the melodies keep their timing. Save states do not store the voice. |
 | SMS (`exen_sms`) | Mock server, Delivered no reply, Offline (`server`, `delivered`, `offline`) | What happens to the SMS games send (rankings, "Your opinion", continues, unlocks; see [SMS.md](re/SMS.md)). Mock server (default): a stand-in for In-Fusio's SMS server reports them as sent and answers the requests that expect an answer, with only what you sent (your own scores and votes). Delivered: sent, never answered. Offline: not sent, as with no network. Takes effect at once. The server's records and an answer in flight are part of save states. Rankings carry the server's default date (2004-01-01): the core never reads the host clock, so runs stay deterministic. |
 
 The options use the v2 interface, falling back to v1 or plain variables on older frontends.
@@ -132,6 +138,13 @@ heap. Real states are 40-250 KB; the rest of the buffer is zeros, which compress
 nothing in RetroArch's state files and rewind buffer. The core declares the
 `ENDIAN_DEPENDENT` serialization quirk, because the VM's heap is stored in host byte order.
 
+With a SoundFont loaded, a state also holds the General MIDI voice's sounding notes (4 KB), so
+rewind, run-ahead and state loads restore the GM audio exactly, as they do for the ring tone. A
+state loaded into a session with a different SoundFont, or none, restarts that voice at the
+current note; frames are never affected. Run-ahead's second instance and netplay peers load
+the same `TimGM6mb.sf2` from their system directory. The SoundFont voice uses the C library's
+floating-point maths, so its samples may differ slightly between platforms (frames do not).
+
 ## Testing
 
 `exen-libretro-test` (built with the core, source in `src/libretro/test_frontend.c`) is a
@@ -152,7 +165,10 @@ build/exen-libretro-test --option exen_screen_size=128x128 --rgb565 game.exn
 
 By default it loads the core it was built with and uses `vendor/gensimu/` as the system
 directory (`--core`, `--system` override them). CTest runs it on the vendored
-`vendor/gensimu/flash/download1.exn` (test `libretro_core`), which needs no game files.
+`vendor/gensimu/flash/download1.exn` (test `libretro_core`), which needs no game files, and
+again with the General MIDI voice (`libretro_core_gm`: `--option exen_melody_voice=piano` and a
+system directory in the build tree holding `gensimu.exe`, `flash/eeprom.dat` and the vendored
+`TimGM6mb.sf2`), so the state round trip and determinism checks cover the SoundFont voice.
 
 ## Known limits
 

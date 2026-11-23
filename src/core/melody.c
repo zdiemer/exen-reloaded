@@ -5,12 +5,16 @@
  * into the next pair in the same firing. Here the "timer" is a countdown on the audio clock.
  *
  * Synthesizer: the original sends the notes to the default MIDI device (General MIDI piano at
- * velocity 64). The core renders them itself, with two voices that always run side by side
- * (every note event goes to both pools) while the host setting picks what is heard:
+ * velocity 64). The core renders them itself, with voice pools that always run side by side
+ * (every note event goes to each pool) while the host setting picks what is heard:
  *
  * - Ring tone (default): a PolyBLEP band-limited square wave with a 3 ms attack, a gentle
  *   decay to 60 % and a 12 ms linear release, through a one-pole low-pass.
- * - Piano: an approximation of the GM acoustic grand (program 0) as Windows' synth played it.
+ * - General MIDI, with a SoundFont (exen_audio_set_soundfont): the MIDI events the original
+ *   sent (note-on at velocity 64, note-off, program changes, drums on channel 9) played by
+ *   TinySoundFont (gm.c). The 0x84 / 0x85 device volume is the output gain, as for the others.
+ * - General MIDI without a SoundFont: a procedural piano, an approximation of the GM acoustic
+ *   grand (program 0) as Windows' synth played it, so the setting still sounds like a piano.
  *   Additive: up to PIANO_PARTIALS slightly inharmonic partials (f_n = n f0 sqrt(1 + B n^2)),
  *   each on two strings detuned by +-0.7 cents (slow beating, the "chorus" of a piano
  *   unison). Partial levels follow a struck string: |sin(pi n x0)| / n for a hammer at 1/8.3
@@ -23,17 +27,20 @@
  *   min(0.4 * rate, 10 kHz) with a taper, so nothing aliases, and every note is normalised to
  *   the same loudness. Program changes are tracked but every program plays the piano.
  *
- * Channel 9 (selected by program change 0) plays filtered noise bursts in both voices. The
- * player is monophonic (each event first turns the previous note off), so a few voices per
- * pool cover the overlapping release tails. A voice switch crossfades over MIX_S; both pools
- * keep running either way, so the sequencer and the note state never depend on the voice.
- * Only the oscillators of an unheard pool are skipped (its phases and levels still advance).
+ * Channel 9 (selected by program change 0) plays the SoundFont's drum kit; in the ring tone
+ * and the procedural piano it plays filtered noise bursts. The player is monophonic (each
+ * event first turns the previous note off), so a few voices per pool cover the overlapping
+ * release tails. A voice switch crossfades over MIX_S; every pool keeps running either way, so
+ * the sequencer and the note state never depend on the voice. Only the oscillators of an
+ * unheard procedural pool are skipped (its phases and levels still advance); the SoundFont
+ * synth always renders while it has voices.
  *
- * The core links no maths library: the few exponentials and roots are computed here (m_exp,
- * m_sqrt) and the sine is a polynomial.
+ * The ring tone and the procedural piano use no maths library (m_exp, m_sqrt and a polynomial
+ * sine are here), so they are bit-identical on every platform. TinySoundFont uses libm.
  */
 #include <string.h>
 
+#include "gm.h"
 #include "platform.h"
 
 /* Duration table (on the stack of 0x43ad57): an index b % 14 gives units of 1/32 beat.
@@ -59,6 +66,11 @@ static const float SEMI[12] = {8.1757989f,  8.6619572f,  9.1770240f,  9.7227182f
 #define DRUM_DECAY_S 0.060f
 #define VOICE_GAIN 0.5f /* peak per channel at MIDI volume 0xff; 0x80 gives about -12 dBFS */
 #define MIX_S 0.030f    /* voice switch crossfade */
+/* SoundFont voice: TinySoundFont's output to the scale of the other voices. At velocity 64
+ * TimGM6mb's piano comes out at an RMS of about 0.09, so this makes game melodies about as loud
+ * as the procedural piano (median RMS within 30 % over six games' title music) */
+#define GM_GAIN 6.0f
+#define GM_BLOCK 256    /* frames rendered by TinySoundFont at a time */
 
 /* piano voice (see the top of the file) */
 #define PIANO_RMS 0.65f        /* RMS of a note at its onset, before the output gains */
@@ -340,6 +352,8 @@ static void note_off(Melody *m, int ch, unsigned note)
             voice_release(m, v);
     }
     piano_off(m, ch, note);
+    if (m->gm) /* 0x80|ch, note, 0 */
+        gm_note_off(m->gm, ch, (int)note);
 }
 
 static void all_off(Melody *m)
@@ -347,6 +361,15 @@ static void all_off(Melody *m)
     for (int i = 0; i < MELODY_VOICES; i++)
         voice_release(m, &m->voice[i]);
     piano_all_off(m);
+    if (m->gm)
+        gm_all_off(m->gm);
+}
+
+/* the program table changed: the SoundFont channels follow it */
+static void programs_changed(Melody *m)
+{
+    if (m->gm)
+        gm_set_programs(m->gm, m->program);
 }
 
 static void note_on(Melody *m, int ch, unsigned note)
@@ -374,6 +397,8 @@ static void note_on(Melody *m, int ch, unsigned note)
     v->noise = 0xace1u + note;
     v->lp = 0.0f;
     piano_on(m, ch, note);
+    if (m->gm) /* 0x90|ch, note, 0x40 */
+        gm_note_on(m->gm, ch, (int)note);
 }
 
 /* ------------------------------------------------------------------ sequencer */
@@ -437,6 +462,7 @@ static void seq_fire(Melody *m)
                 } else if (b <= 0x80) {
                     m->program[m->ch] = b;
                 }
+                programs_changed(m);
                 break;
             case 2:
                 /* "Rest": the original sets the duration but neither advances past the pair nor
@@ -462,6 +488,7 @@ static void seq_fire(Melody *m)
             if (m->len > 2) { /* melody_stop: all off, system reset */
                 all_off(m);
                 memset(m->program, 0, sizeof m->program);
+                programs_changed(m);
             }
             seq_end(m);
             return;
@@ -504,6 +531,7 @@ void melody_stop(struct ExenVM *vm)
     m->playing = 0;
     all_off(m);
     memset(m->program, 0, sizeof m->program);
+    programs_changed(m);
     if (vm->host.melody_stop)
         vm->host.melody_stop(vm->host.user);
 }
@@ -596,7 +624,7 @@ static void synth(Melody *m, int16_t *out, int frames)
     float lpk = 0.45f;                     /* one-pole low-pass, about 4.5 kHz at 44.1 kHz */
     if (m->rate > 44100)
         lpk = 0.45f * 44100.0f / rate;
-    int any = 0, anyp = 0;
+    int any = 0, anyp = 0, gm = m->gm != NULL, anyg = gm && gm_active(m->gm);
     for (int i = 0; i < MELODY_VOICES; i++)
         any |= m->voice[i].state != 0;
     /* piano coefficients of the sounding notes, for this block */
@@ -608,38 +636,56 @@ static void synth(Melody *m, int16_t *out, int frames)
         }
     float target = m->timbre == EXEN_VOICE_PIANO ? 1.0f : 0.0f;
     float mstep = 1.0f / (MIX_S * rate);
-    if (!any && !anyp)
+    if (!any && !anyp && !anyg)
         m->mix = target; /* nothing sounds: switch at once */
-    for (int f = 0; f < frames; f++) {
-        float s = 0.0f, drum = 0.0f, p = 0.0f;
-        if (any)
-            for (int i = 0; i < MELODY_VOICES; i++) {
-                MelodyVoice *v = &m->voice[i];
-                if (v->drum)
-                    drum += voice_sample(v, att, dec, ddec);
-                else
-                    s += voice_sample(v, att, dec, ddec);
+    float gbuf[2 * GM_BLOCK]; /* SoundFont voice, this block */
+    for (int f0 = 0; f0 < frames; f0 += GM_BLOCK) {
+        int nb = frames - f0 < GM_BLOCK ? frames - f0 : GM_BLOCK;
+        if (anyg) /* always rendered while it has voices, so it keeps time when unheard */
+            gm_render(m->gm, gbuf, nb);
+        for (int j = 0; j < nb; j++) {
+            int f = f0 + j;
+            float s = 0.0f, drum = 0.0f, p = 0.0f, gl = 0.0f, gr = 0.0f;
+            if (any)
+                for (int i = 0; i < MELODY_VOICES; i++) {
+                    MelodyVoice *v = &m->voice[i];
+                    if (v->drum)
+                        drum += voice_sample(v, att, dec, ddec);
+                    else
+                        s += voice_sample(v, att, dec, ddec);
+                }
+            if (m->mix != target) {
+                m->mix += m->mix < target ? mstep : -mstep;
+                if ((target - m->mix) * (target > 0.5f ? 1.0f : -1.0f) <= 0.0f)
+                    m->mix = target;
             }
-        if (m->mix != target) {
-            m->mix += m->mix < target ? mstep : -mstep;
-            if ((target - m->mix) * (target > 0.5f ? 1.0f : -1.0f) <= 0.0f)
-                m->mix = target;
+            float mix = m->mix;
+            /* the procedural piano is heard only without a SoundFont */
+            if (anyp)
+                for (int i = 0; i < PIANO_VOICES; i++)
+                    if (m->piano[i].state)
+                        p += piano_sample(&m->piano[i], &pp[i], mix > 0.0f && !gm);
+            if (anyg && mix > 0.0f) {
+                gl = gbuf[2 * j] * (GM_GAIN * mix);
+                gr = gbuf[2 * j + 1] * (GM_GAIN * mix);
+            }
+            /* The ring tone and the noise drums go through the output low-pass; the piano and
+             * the SoundFont are band-limited already. With a SoundFont, its drum kit replaces
+             * the noise drums. */
+            if (mix > 0.0f) {
+                s *= 1.0f - mix;
+                if (gm)
+                    drum *= 1.0f - mix;
+            }
+            s += drum;
+            p *= mix;
+            m->gain_l += (tl - m->gain_l) * smooth;
+            m->gain_r += (tr - m->gain_r) * smooth;
+            m->lp_l += (s * m->gain_l - m->lp_l) * lpk;
+            m->lp_r += (s * m->gain_r - m->lp_r) * lpk;
+            out[2 * f] = clip16(m->lp_l + (p + gl) * m->gain_l);
+            out[2 * f + 1] = clip16(m->lp_r + (p + gr) * m->gain_r);
         }
-        float mix = m->mix;
-        if (anyp)
-            for (int i = 0; i < PIANO_VOICES; i++)
-                if (m->piano[i].state)
-                    p += piano_sample(&m->piano[i], &pp[i], mix > 0.0f);
-        /* the ring tone and the drums go through the output low-pass; the piano is band-limited
-         * by construction */
-        s = (mix > 0.0f ? s * (1.0f - mix) : s) + drum;
-        p *= mix;
-        m->gain_l += (tl - m->gain_l) * smooth;
-        m->gain_r += (tr - m->gain_r) * smooth;
-        m->lp_l += (s * m->gain_l - m->lp_l) * lpk;
-        m->lp_r += (s * m->gain_r - m->lp_r) * lpk;
-        out[2 * f] = clip16(m->lp_l + p * m->gain_l);
-        out[2 * f + 1] = clip16(m->lp_r + p * m->gain_r);
     }
 }
 
@@ -676,11 +722,16 @@ int exen_audio_active(ExenVM *vm)
     for (int i = 0; i < MELODY_VOICES; i++)
         if (m->voice[i].state)
             return 1;
-    /* piano tails count only while heard: they ring out while the host renders anyway */
-    if (m->mix > 0.0f || m->timbre == EXEN_VOICE_PIANO)
+    /* piano and SoundFont tails count only while heard: they ring out while the host renders
+     * anyway */
+    if (m->mix > 0.0f || m->timbre == EXEN_VOICE_PIANO) {
+        if (m->gm)
+            return gm_active(m->gm) || m->lp_l > 1.0f || m->lp_l < -1.0f || m->lp_r > 1.0f ||
+                   m->lp_r < -1.0f;
         for (int i = 0; i < PIANO_VOICES; i++)
             if (m->piano[i].state)
                 return 1;
+    }
     /* let the output filter settle to silence */
     return m->lp_l > 1.0f || m->lp_l < -1.0f || m->lp_r > 1.0f || m->lp_r < -1.0f;
 }
@@ -699,10 +750,59 @@ void exen_audio_set_voice(ExenVM *vm, int voice)
         sounding |= m->voice[i].state != 0;
     for (int i = 0; i < PIANO_VOICES; i++)
         sounding |= m->piano[i].state != 0;
+    if (m->gm)
+        sounding |= gm_active(m->gm);
     if (!sounding) /* nothing to crossfade */
         m->mix = m->timbre == EXEN_VOICE_PIANO ? 1.0f : 0.0f;
 }
 
 int exen_audio_voice(ExenVM *vm) { return mel(vm)->timbre; }
+
+/* The SoundFont voices from silence, on the current programs, with the note the sequencer has
+ * sounding (if any) struck again: what a MIDI synth reset while the melody plays would do. */
+static void gm_restart(Melody *m)
+{
+    gm_silence(m->gm);
+    gm_set_programs(m->gm, m->program);
+    if (m->playing && m->prev >= 1 && m->prev <= 0x7f)
+        gm_note_on(m->gm, m->ch, m->prev);
+}
+
+int exen_audio_set_soundfont(ExenVM *vm, const void *sf2, size_t len)
+{
+    Melody *m = mel(vm);
+    if (!sf2 || !len) {
+        gm_free(m->gm);
+        m->gm = NULL;
+        return 0;
+    }
+    GmSynth *g = gm_create(sf2, len, m->rate);
+    if (!g)
+        return -1; /* not a usable SoundFont: the previous one (if any) stays */
+    gm_free(m->gm);
+    m->gm = g;
+    gm_restart(m);
+    return 0;
+}
+
+int exen_audio_soundfont(ExenVM *vm) { return mel(vm)->gm != NULL; }
+
+int melody_gm_restore(Melody *m, const uint8_t *rec, size_t len)
+{
+    if (!m->gm)
+        return 0;
+    if (rec && gm_load(m->gm, rec, len) == 0) {
+        gm_set_programs(m->gm, m->program);
+        return 1;
+    }
+    gm_restart(m);
+    return 0;
+}
+
+void melody_free(Melody *m)
+{
+    gm_free(m->gm);
+    m->gm = NULL;
+}
 
 int exen_audio_rate(ExenVM *vm) { return mel(vm)->rate; }

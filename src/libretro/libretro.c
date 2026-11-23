@@ -1,7 +1,8 @@
 /* exen-reloaded libretro core (docs/LIBRETRO.md).
  *
  * Content is a .exn game, loaded from memory. The ExEn framework classes come from the
- * original simulator, gensimu.exe, which the user puts in the frontend's system directory.
+ * original simulator, gensimu.exe, which the user puts in the frontend's system directory. The
+ * General MIDI melody voice's SoundFont, TimGM6mb.sf2, is optional and found there too.
  *
  * Timing
  * ------
@@ -129,8 +130,8 @@ static const struct {
 
 static struct {
     ExenVM *vm;
-    uint8_t *sim, *game, *eep_defaults;
-    size_t sim_len, game_len, eep_len;
+    uint8_t *sim, *game, *eep_defaults, *sf2;
+    size_t sim_len, game_len, eep_len, sf2_len;
     ExenGameInfo gi;
     int w, h;              /* screen of the running VM */
     int geom_w, geom_h;    /* max geometry reported to the frontend */
@@ -216,16 +217,22 @@ static const char audio_info[] =
      {"128x128", NULL}, {"128x141", NULL}, {"128x160", NULL}, {"132x176", NULL}, {NULL, NULL}}
 #define AUDIO_VALUES {{"enabled", NULL}, {"disabled", NULL}, {NULL, NULL}}
 static const char voice_info[] =
-    "How the melodies sound. Ring tone: a square wave, like a 2003 handset. Piano: like the "
-    "original simulator, which played them on the PC's General MIDI piano. Takes effect at once; "
-    "the melodies keep their timing.";
-#define VOICE_VALUES     {{"ringtone", "Ring tone"}, {"piano", "Piano (like the 2003 simulator)"}, {NULL, NULL}}
+    "How the melodies sound. Ring tone: a square wave, like a 2003 handset. General MIDI: like "
+    "the original simulator, which played them on the PC's General MIDI synth (a piano unless "
+    "the melody picks another instrument), from the SoundFont TimGM6mb.sf2 in the system "
+    "directory; without it, a piano approximation. Takes effect at once; the melodies keep "
+    "their timing.";
+/* the value "piano" is the General MIDI voice's older name, kept for saved option files */
+#define VOICE_VALUES                                                                         \
+    {{"ringtone", "Ring tone"}, {"piano", "General MIDI (like the 2003 simulator)"}, {NULL, NULL}}
 static const char sms_info[] =
     "What happens to the SMS a game sends (scores for a ranking, \"Your opinion\" votes, "
     "continues, unlocks). Server: a mock of In-Fusio's SMS server receives them and answers "
     "like the real one (rankings hold only your own scores). Delivered: they are sent but never "
     "answered. Offline: they fail, as with no network.";
-#define SMS_VALUES                                                                             {{"server", "Mock server"}, {"delivered", "Delivered, no reply"}, {"offline", "Offline"},      {NULL, NULL}}
+#define SMS_VALUES                                                                         \
+    {{"server", "Mock server"}, {"delivered", "Delivered, no reply"}, {"offline", "Offline"}, \
+     {NULL, NULL}}
 
 static struct retro_core_option_v2_definition options_v2[] = {
     {OPT_SIZE, "Screen size", NULL, size_info, NULL, NULL, SIZE_VALUES, "auto"},
@@ -256,7 +263,7 @@ static void set_options(void)
     static const struct retro_variable vars[] = {
         {OPT_SIZE, "Screen size; auto|101x80|112x112|120x143|128x128|128x141|128x160|132x176"},
         {OPT_AUDIO, "Sound; enabled|disabled"},
-        {OPT_VOICE, "Melody voice; ringtone|piano"},
+        {OPT_VOICE, "Melody voice (piano = General MIDI); ringtone|piano"},
         {OPT_SMS, "SMS; server|delivered|offline"},
         {NULL, NULL},
     };
@@ -292,7 +299,7 @@ static void apply_audio_option(void)
     const char *v = get_option(OPT_AUDIO);
     g.audio_on = !v || strcmp(v, "disabled") != 0;
     v = get_option(OPT_VOICE);
-    g.voice = v && !strcmp(v, "piano") ? EXEN_VOICE_PIANO : EXEN_VOICE_RINGTONE;
+    g.voice = v && !strcmp(v, "piano") ? EXEN_VOICE_GM : EXEN_VOICE_RINGTONE;
     if (g.vm) {
         exen_audio_set_volume(g.vm, g.audio_on ? 100 : 0);
         exen_audio_set_voice(g.vm, g.voice);
@@ -437,6 +444,27 @@ static uint8_t *find_eeprom_defaults(const char *dir, size_t *len)
     return NULL;
 }
 
+/* The General MIDI SoundFont: <system>/TimGM6mb.sf2 or <system>/exen/TimGM6mb.sf2. */
+static uint8_t *find_soundfont(const char *sys, size_t *len)
+{
+    static const char *const names[] = {"TimGM6mb.sf2", "exen/TimGM6mb.sf2",
+                                        "exen/soundfont/TimGM6mb.sf2"};
+    size_t sl = strlen(sys);
+    const char *sep = sl && (sys[sl - 1] == '/' || sys[sl - 1] == '\\') ? "" : "/";
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        char path[1200];
+        snprintf(path, sizeof path, "%s%s%s", sys, sep, names[i]);
+        uint8_t *b = read_file(path, len);
+        if (b) {
+            log_printf(RETRO_LOG_INFO, "General MIDI SoundFont: %s", path);
+            return b;
+        }
+    }
+    log_printf(RETRO_LOG_INFO, "no TimGM6mb.sf2 in the system directory: the General MIDI "
+               "melody voice plays a piano approximation");
+    return NULL;
+}
+
 /* ------------------------------------------------------------ VM lifecycle */
 
 static void destroy_vm(void)
@@ -506,6 +534,8 @@ static int create_vm(int fresh)
     g.vm = vm;
     if (fresh)
         exen_eeprom_reset(vm, g.eep_defaults, g.eep_len); /* -> on_eeprom fills g.sram */
+    if (g.sf2 && exen_audio_set_soundfont(vm, g.sf2, g.sf2_len) < 0)
+        log_printf(RETRO_LOG_WARN, "TimGM6mb.sf2 is not a usable SoundFont");
     exen_audio_set_volume(vm, g.audio_on ? 100 : 0);
     exen_audio_set_voice(vm, g.voice);
     apply_sms_option();
@@ -700,8 +730,9 @@ static void free_content(void)
     free(g.sim);
     free(g.game);
     free(g.eep_defaults);
+    free(g.sf2);
     free(g.fb);
-    g.sim = g.game = g.eep_defaults = NULL;
+    g.sim = g.game = g.eep_defaults = g.sf2 = NULL;
     g.fb = NULL;
     g.w = g.h = 0;
     g.state_size = 0;
@@ -731,6 +762,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info *game)
         return false;
     }
     g.eep_defaults = find_eeprom_defaults(dir, &g.eep_len);
+    g.sf2 = find_soundfont(sys, &g.sf2_len);
 
     g.game = malloc(game->size);
     if (!g.game) {

@@ -43,7 +43,7 @@ ctest --test-dir build --output-on-failure      # C unit tests: asset-free, abou
 python -m unittest discover -s tests/python     # tool parsers, generated headers
 ```
 
-The unit tests need no games (they use the vendored simulator and flash files). Corpus-level
+The unit tests need no games (they use the vendored simulator, flash files and SoundFont). Corpus-level
 checks live in `tools/harness/compat.py` and `exen-run --selftest-state`. CI runs the unit tests on
 Linux, macOS and Windows, plus sanitizers and a check that generated headers are current.
 

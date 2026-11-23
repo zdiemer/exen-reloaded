@@ -1,6 +1,6 @@
 # Unit tests (CTest). Asset-free: besides synthetic data built by the tests themselves they only
 # read files that are part of the source tree (vendor/gensimu/gensimu.exe, the two vendored
-# vendor/gensimu/flash/*.exn, data/gamedb.tsv).
+# vendor/gensimu/flash/*.exn, data/gamedb.tsv, vendor/soundfont/TimGM6mb.sf2).
 #
 #   cmake -S . -B build -DEXEN_BUILD_TESTS=ON && cmake --build build
 #   ctest --test-dir build --output-on-failure

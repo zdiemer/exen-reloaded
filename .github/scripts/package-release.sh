@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Stage and archive a release build: the two binaries, any SDL3 runtime library the build
-# produced (none when SDL3 is linked statically, as release.yml does), the README, and the
-# vendored original simulator beside the binaries, where both frontends look for it.
-# No games are included.
+# produced (none when SDL3 is linked statically, as release.yml does), the README, the
+# vendored original simulator beside the binaries, where both frontends look for it, and the
+# General MIDI SoundFont (TimGM6mb.sf2, GPL-2, with its licence) in soundfont/ beside them.
+# The libretro core goes in libretro/; its system files are the same top-level copies (see
+# docs/LIBRETRO.md, Install). No games are included.
 #
 #   .github/scripts/package-release.sh <build-dir> <out-dir> <package-name>
 #
@@ -39,7 +41,12 @@ find "$build" -maxdepth 3 \( -name 'SDL3.dll' -o -name 'libSDL3*.so*' -o -name '
 cp "$root/README.md" "$dir/"
 # libretro core and its .info (install into the frontend's cores/ and info/ directories)
 for core in "$build"/exen_reloaded_libretro.dll "$build"/exen_reloaded_libretro.so "$build"/exen_reloaded_libretro.dylib; do
-  [ -f "$core" ] && mkdir -p "$dir/libretro" && cp "$core" "$build/exen_reloaded_libretro.info" "$dir/libretro/"
+  if [ -f "$core" ]; then
+    mkdir -p "$dir/libretro"
+    cp "$core" "$build/exen_reloaded_libretro.info" "$dir/libretro/"
+    # the system files (gensimu.exe, flash/, soundfont/TimGM6mb.sf2) are the app's copies at
+    # the top of the archive; docs/LIBRETRO.md says to copy them into the system directory
+  fi
 done
 [ -f "$root/docs/LIBRETRO.md" ] && cp "$root/docs/LIBRETRO.md" "$dir/libretro/" 2>/dev/null || true
 cp "$root/vendor/gensimu/gensimu.exe" "$dir/"
@@ -47,6 +54,11 @@ cp "$root/vendor/gensimu/gensimu.exe" "$dir/"
 mkdir -p "$dir/flash"
 cp "$root/vendor/gensimu/flash/eeprom.dat" "$dir/flash/"
 cp "$root/vendor/gensimu/PROVENANCE.md" "$dir/gensimu-PROVENANCE.md"
+# the General MIDI melody voice's SoundFont, where both frontends look for it, with its licence
+mkdir -p "$dir/soundfont"
+cp "$root/vendor/soundfont/TimGM6mb.sf2" "$root/vendor/soundfont/COPYING" \
+  "$root/vendor/soundfont/PROVENANCE.md" "$dir/soundfont/"
+cp "$root/vendor/tinysoundfont/LICENSE" "$dir/TinySoundFont-LICENSE"
 if [ -f "$root/LICENSE" ]; then
   cp "$root/LICENSE" "$dir/"
 fi
@@ -63,6 +75,9 @@ esac
 # Smoke test the package: exen-run must find gensimu.exe beside itself (no --sim).
 "$dir/exen-run$exe" --frames 30 --quiet "$root/vendor/gensimu/flash/download1.exn" > "$stage/smoke.txt"
 grep -q "status: running" "$stage/smoke.txt"
+# ... and the SoundFont in soundfont/ for the General MIDI voice
+"$dir/exen-run$exe" --frames 30 --quiet --voice gm "$root/vendor/gensimu/flash/download1.exn" > "$stage/smoke.txt"
+grep -q "^soundfont: .*soundfont/TimGM6mb.sf2" "$stage/smoke.txt"
 echo "== package smoke test passed"
 
 cd "$stage"
