@@ -13,7 +13,7 @@ target_compile_definitions(exen_test_support PUBLIC
   EXEN_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
   EXEN_GENSIMU_PATH="${PROJECT_SOURCE_DIR}/vendor/gensimu/gensimu.exe")
 
-set(EXEN_C_TESTS hash loader interp heap codec melody gamedb boot sms)
+set(EXEN_C_TESTS hash loader interp heap codec melody gamedb boot sms playfield)
 foreach(name IN LISTS EXEN_C_TESTS)
   add_executable(test_${name} c/test_${name}.c)
   target_link_libraries(test_${name} PRIVATE exen_test_support)

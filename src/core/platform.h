@@ -45,6 +45,7 @@ struct ExenPlatform {
 };
 
 int plat_class(ExenVM *vm, int which);
+void playfield_sort_sprites(ExenVM *vm, uint32_t *pf_fields); /* playfield.c */
 /* The VM clock in ms (Gamelet.getTimerTickCount): the host's clock plus vm->clock_offset. */
 uint32_t exen_vm_ticks(ExenVM *vm);
 /* Log `msg` the first time `bit` is used. */
