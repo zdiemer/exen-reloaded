@@ -14,6 +14,7 @@
 #define EXEN_SDL_INPUT_H
 
 #include <SDL3/SDL.h>
+#include <stddef.h>
 
 enum { INPUT_KEY = 1, INPUT_BUTTON, INPUT_AXIS };
 
@@ -73,6 +74,28 @@ char *input_format_config(const Input *in, int header);
 /* Phone key names, as used in the config file ("5", "star", "ok", ...). */
 const char *input_phone_name(int code);
 int input_phone_from_name(const char *name); /* 0 if unknown */
+
+/* --- editing, for the controls panel (ui.c) --- */
+
+/* The phone key at `index` (0..INPUT_NPHONE-1, keypad order), 0 if out of range. */
+int input_phone_at(int index);
+/* A label for people: "2 (up)", "* (star)", "OK (select)", ... */
+const char *input_phone_label(int code);
+/* The bindings of phone key `code` on the keyboard (pad = 0) or on the gamepads (pad = 1) as
+ * text in the config syntax ("Up, Keypad 8, W"); "" if there are none. */
+void input_describe(const Input *in, int code, int pad, char *buf, size_t n);
+/* One input as text in the config syntax ("Keypad 8", "south", "lefty-"). */
+void input_describe_source(int kind, int code, int dir, char *buf, size_t n);
+/* Bind an input to phone key `code`. Returns 1 if added, 0 if it already was bound to it or
+ * the table is full. Releases every held key first, as do input_unbind and
+ * input_reset_defaults. */
+int input_bind(Input *in, int kind, int code, int dir, int phone);
+/* Remove the bindings of phone key `code` on the keyboard (pad = 0) or the gamepads (pad = 1). */
+void input_unbind(Input *in, int code, int pad);
+/* Back to the built-in bindings and stick thresholds. */
+void input_reset_defaults(Input *in);
+/* Write the bindings to `path` with the explanatory header (atomically). Returns 0 or -1. */
+int input_save_config(const Input *in, const char *path);
 
 /* Feed an SDL event. Handles key (auto-repeat ignored), gamepad button, axis and hotplug
  * events. Returns 1 if the event was a bound input or a gamepad event. */
