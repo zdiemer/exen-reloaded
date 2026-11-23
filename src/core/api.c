@@ -21,6 +21,7 @@ void platform_set_font(ExenVM *vm, const uint8_t *bits);
 #define BS_TICK       0x3f522033u
 #define BS_EXIT       0x3f523566u
 #define BS_SMSSENT    0x305a7631u /* smsSent(I)V */
+#define BS_SMSRECEIVED 0x6f6c0565u /* smsReceived([B)V */
 
 static void set_error(ExenVM *vm, const char *msg)
 {
@@ -184,7 +185,7 @@ static int call_bootstrap(ExenVM *vm, uint32_t hash, uint32_t *args, int nargs)
     if (r < 0)
         return -1;
     /* Events a native queued for after the callback, never delivered re-entrantly: sendSms
-     * reports its (failed) send through Bootstrap.smsSent (sms.c). One delivery per host
+     * reports its send through Bootstrap.smsSent (sms.c). One delivery per host
      * callback: a send made by the smsSent handler itself is reported after the next one, so a
      * game that retries on failure cannot recurse here. */
     if (vm->ext.sms_sent && !vm->halted && !vm->ext.delivering) {
@@ -194,6 +195,19 @@ static int call_bootstrap(ExenVM *vm, uint32_t hash, uint32_t *args, int nargs)
         r = call_bootstrap(vm, BS_SMSSENT, &status, 1);
         vm->ext.delivering = 0;
         return r;
+    }
+    /* A reply from the mock SMS server that is due on the VM clock (smsserver.c), delivered
+     * the same way: Bootstrap.smsReceived(byte[]) -> Gamelet.onSmsReceived. */
+    if (!vm->halted && !vm->ext.delivering) {
+        uint32_t arr = smsv_take_array(vm);
+        if (arr) {
+            root_push(vm, arr);
+            vm->ext.delivering = 1;
+            r = call_bootstrap(vm, BS_SMSRECEIVED, &arr, 1);
+            vm->ext.delivering = 0;
+            root_pop(vm, 1);
+            return r;
+        }
     }
     return 0;
 }

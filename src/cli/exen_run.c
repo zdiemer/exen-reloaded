@@ -101,9 +101,15 @@ static void on_melody_stop(void *u)
         printf("melody stop t=%u ms\n", r->now_ms);
 }
 static void on_eeprom(void *u) { ((Run *)u)->eeprom_writes++; }
+
+/* --sms MODE, --sms-log (SMS: the core's mock In-Fusio server, docs/re/SMS.md) */
+static int g_sms_mode = EXEN_SMS_SERVER, g_sms_log;
+
 static void on_log(void *u, const char *m)
 {
-    if (!((Run *)u)->quiet)
+    if (g_sms_log && !strncmp(m, "sms: ", 5))
+        printf("tick %d: %s\n", ((Run *)u)->tick, m); /* on stdout even with --quiet */
+    else if (!((Run *)u)->quiet)
         fprintf(stderr, "[vm] %s\n", m);
 }
 
@@ -263,6 +269,9 @@ static void usage(void)
             "                    --frames, then load the state into a fresh VM and run again.\n"
             "                    Frames, audio and the final state must be identical. Prints\n"
             "                    PASS or FAIL; exit status 0 or 1.\n"
+            "  --sms MODE        SMS: server (default; the mock In-Fusio server answers),\n"
+            "                    delivered (sent, never answered) or offline (not sent)\n"
+            "  --sms-log         print the decoded SMS traffic (and a hex dump) on stdout\n"
             "  --quiet           no VM log\n");
 }
 
@@ -298,6 +307,8 @@ static ExenVM *make_vm(const Inputs *in, Run *run)
     if (in->eeprom)
         memcpy(exen_eeprom(vm), in->eeprom, in->el < EXEN_EEPROM_SIZE ? in->el : EXEN_EEPROM_SIZE);
     exen_audio_set_voice(vm, in->voice);
+    exen_sms_set_mode(vm, g_sms_mode);
+    exen_sms_set_log(vm, g_sms_log);
     return vm;
 }
 
@@ -522,6 +533,20 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
         else if (!strcmp(argv[i], "--rate") && i + 1 < argc) wav.rate = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--melodies")) run.log_melodies = 1;
+        else if (!strcmp(argv[i], "--sms-log")) g_sms_log = 1;
+        else if (!strcmp(argv[i], "--sms") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (!strcmp(m, "server"))
+                g_sms_mode = EXEN_SMS_SERVER;
+            else if (!strcmp(m, "delivered"))
+                g_sms_mode = EXEN_SMS_DELIVERED;
+            else if (!strcmp(m, "offline"))
+                g_sms_mode = EXEN_SMS_OFFLINE;
+            else {
+                fprintf(stderr, "--sms: unknown mode %s (server, delivered, offline)\n", m);
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--voice") && i + 1 < argc) {
             const char *v = argv[++i];
             if (!strcmp(v, "ringtone"))

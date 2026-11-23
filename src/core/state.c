@@ -20,7 +20,7 @@
  *     +20 u32 code_end    +24 u32 arena size (code + heap): must match the loading VM
  *     +28 u32 payload length   +32 u32 CRC-32 of the payload   +36 u32 0 (reserved)
  *   payload: chunks of { u32 tag, u32 length, data }. The tags below are required once each
- *   (CODE and PIAN are optional); unknown tags are skipped. Bytes after the payload are ignored.
+ *   (CODE, PIAN and SMSV are optional); unknown tags are skipped. Bytes after the payload are ignored.
  *
  * Byte images (heap, stack, code) are stored as a run-length code for zeros: records of
  * { u32 zero count, u32 literal count, literal bytes } that exactly fill the image. Free heap
@@ -58,6 +58,9 @@
  *   ext.sms_sent, sms_status saved (VM): a Bootstrap.smsSent report queued for after the next
  *                            callback (a send made from within the smsSent handler)
  *   ext.delivering           0 between callbacks
+ *   smsv                     saved (SMSV, optional): the mock SMS server's records (scores, votes,
+ *                            unlocks, nickname) and the reply in flight with its due time on the
+ *                            VM clock; its host settings (mode, log, date) are not saved
  *   clock_offset             not saved as such: the VM clock value is saved (VM) and the
  *                            loading VM sets its offset so that the clock continues from it
  *   exn, exn_len, exn_crc, code_crc, main_class  the loaded game, checked by CRC
@@ -107,6 +110,7 @@
 #define T_EEPR TAG('E', 'E', 'P', 'R')
 #define T_MELO TAG('M', 'E', 'L', 'O')
 #define T_PIAN TAG('P', 'I', 'A', 'N')
+#define T_SMSV TAG('S', 'M', 'S', 'V') /* mock SMS server (smsserver.c), optional */
 
 /* zero runs shorter than this stay in the literal */
 #define RLE_MIN_ZEROS 16u
@@ -499,6 +503,15 @@ static size_t write_state(ExenVM *vm, W *w)
     write_piano(w, &p->melody);
     chunk_end(w, c);
 
+    /* SMSV: the mock SMS server's records and any reply in flight (smsserver.c) */
+    {
+        uint8_t sv[SMSV_STATE_MAX];
+        size_t sn = smsv_save(&vm->smsv, sv, sizeof sv);
+        c = chunk_begin(w, T_SMSV);
+        w_bytes(w, sv, sn);
+        chunk_end(w, c);
+    }
+
     size_t total = w->pos;
     w_patch32(w, 28, (uint32_t)(total - HDR_BYTES));
     if (w->buf && total <= w->cap)
@@ -536,6 +549,7 @@ size_t exen_state_max_size(ExenVM *vm)
     /* MELO: header fields, the melody bytes, program table, voices, output filters */
     n += 8 + 16 * 4 + MELODY_MAX + sizeof p->melody.program + MELODY_VOICES * 10 * 4 + 4 * 4;
     n += 8 + 2 * 4 + PIANO_VOICES * (8 * 4 + PIANO_PARTIALS * 4 * 4); /* PIAN */
+    n += 8 + SMSV_STATE_MAX; /* SMSV: the mock SMS server (smsserver.c) */
     return n + 256; /* slack for small additions to the chunks above */
 }
 
@@ -1001,6 +1015,26 @@ int exen_state_load(ExenVM *vm, const void *buf, size_t len)
         why = "load state: bad melody data";
     if (!why && have[OPT_PIAN] && parse_piano(&chunk[OPT_PIAN], &s) < 0)
         why = "load state: bad melody data (piano voice)";
+    /* SMSV (optional): a state without it, from before the mock SMS server, loads with an idle
+     * server. The host settings (mode, log, date) are kept. */
+    ExSmsServer smsv = vm->smsv;
+    if (!why) {
+        R sc = {b + HDR_BYTES, plen, 0, 0};
+        int found = 0;
+        while (sc.pos < sc.len) {
+            uint32_t tag = r_u32(&sc), clen = r_u32(&sc);
+            if (!r_need(&sc, clen))
+                break;
+            if (tag == T_SMSV) {
+                found = 1;
+                if (smsv_load(&smsv, sc.p + sc.pos, clen) < 0)
+                    why = "load state: bad SMS server data";
+            }
+            sc.pos += clen;
+        }
+        if (!found)
+            smsv_reset(&smsv);
+    }
     if (why) {
         staged_free(&s);
         set_err(vm, why);
@@ -1041,6 +1075,7 @@ int exen_state_load(ExenVM *vm, const void *buf, size_t len)
     vm->ext.sms_sent = s.sms_sent;
     vm->ext.sms_status = s.sms_status;
     vm->ext.delivering = 0;
+    vm->smsv = smsv;
     uint32_t host_now = vm->host.ticks_ms ? vm->host.ticks_ms(vm->host.user) : 0;
     vm->clock_offset = s.ticks - host_now;
     p->normal_video = s.normal_video;

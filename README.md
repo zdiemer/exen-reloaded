@@ -123,6 +123,26 @@ milliseconds and never changes the melody's timing. The voice is a player settin
 do not store it. `exen-run --voice piano --wav out.wav game.exn` renders a game's audio with
 either voice.
 
+## SMS
+
+Most games send SMS to In-Fusio's server, which is long gone: scores for a world ranking,
+ranking updates, "Your opinion" votes, pay-per-use continues, unlocks and downloads of extra
+content, and restores of what was bought. The original simulator forwarded them to a separate
+In-Fusio PC tool. exen-reloaded mocks that server instead ([docs/re/SMS.md](docs/re/SMS.md)):
+
+- **server** (default): every SMS is reported as sent, and requests that expect an answer get
+  the most generous valid one about two seconds later: a continue is granted, an unlock or a
+  download is granted, a score is ranked. Rankings and vote results hold only what you sent
+  (your own scores, your own votes); nothing is made up.
+- **delivered**: reported as sent, never answered (the simulator with its SMS link off).
+  Continues still work; games waiting for an answer wait until you cancel.
+- **offline**: reported as not sent, as with no network; games show their "problem when sending
+  the SMS" screen.
+
+The SDL frontend takes `--sms server|delivered|offline` (and dates rankings with today's date),
+the libretro core has the option "SMS", and `exen-run --sms MODE --sms-log` prints the decoded
+traffic. The server's records and an answer in flight are part of save states; the mode is not.
+
 ## Saves and save states
 
 Games keep their high scores and progress in the phone's EEPROM (`Gamelet.saveCtx`). The SDL

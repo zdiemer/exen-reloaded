@@ -1,7 +1,8 @@
 /* exen-reloaded SDL3 frontend.
  *
  *   exen-reloaded [--sim gensimu.exe] [--scale N] [--size WxH] [--fullscreen]
- *                 [--mute] [--volume N] [--voice ringtone|piano] [--keys-config PATH] game.exn
+ *                 [--mute] [--volume N] [--voice ringtone|piano] [--sms MODE]
+ *                 [--keys-config PATH] game.exn
  *   exen-reloaded [--keys-config PATH] --print-bindings
  *
  * Pacing is event driven: the thread sleeps in SDL_WaitEventTimeout until the next game tick
@@ -187,6 +188,8 @@ static void usage(void)
             "  --volume N      sound volume 0-100 (default 100)\n"
             "  --voice V       melody voice: ringtone (default, a 2003 handset) or piano (like\n"
             "                  the GM piano the original simulator played; V toggles)\n"
+            "  --sms MODE      SMS: server (default; a mock of In-Fusio's SMS server answers),\n"
+            "                  delivered (sent, never answered) or offline (not sent)\n"
             "  --keys-config PATH\n"
             "                  controls file (default: keys.ini beside the app, or in the user\n"
             "                  data directory if that is not writable; written with the defaults)\n"
@@ -208,6 +211,7 @@ int main(int argc, char **argv)
     const char *keys_config = NULL;
     int scale = 4, w = 0, h = 0, fullscreen = 0, mute = 0, volume = 100, print_bindings = 0;
     int voice = EXEN_VOICE_RINGTONE;
+    int sms = EXEN_SMS_SERVER; /* --sms */
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--sim") && i + 1 < argc) sim = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
@@ -221,6 +225,16 @@ int main(int argc, char **argv)
                 voice = EXEN_VOICE_PIANO;
             else if (!strcmp(v, "ringtone"))
                 voice = EXEN_VOICE_RINGTONE;
+            else { usage(); return 2; }
+        }
+        else if (!strcmp(argv[i], "--sms") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "server"))
+                sms = EXEN_SMS_SERVER;
+            else if (!strcmp(v, "delivered"))
+                sms = EXEN_SMS_DELIVERED;
+            else if (!strcmp(v, "offline"))
+                sms = EXEN_SMS_OFFLINE;
             else { usage(); return 2; }
         }
         else if (!strcmp(argv[i], "--keys-config") && i + 1 < argc) keys_config = argv[++i];
@@ -320,6 +334,14 @@ int main(int argc, char **argv)
     }
     exen_audio_set_volume(vm, a.muted ? 0 : a.volume);
     exen_audio_set_voice(vm, a.voice);
+    /* SMS: the mock server dates its rankings with today's date */
+    exen_sms_set_mode(vm, sms);
+    {
+        SDL_Time now;
+        SDL_DateTime dt;
+        if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &dt, true))
+            exen_sms_set_date(vm, dt.year, dt.month, dt.day);
+    }
     /* controls (input.c); gamepads arrive as SDL_EVENT_GAMEPAD_ADDED */
     Input controls;
     input_init(&controls, on_phone_key, vm);
