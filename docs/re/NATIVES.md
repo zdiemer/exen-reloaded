@@ -321,7 +321,7 @@ RayCast engine, DialogBox and List were translated directly into `src/core/rayca
 | 44 | AnimBitmap.moduloFrame(I)I | 0x4245fe | positive `f mod (frameSequence.length or nbFrame)` | high |
 | 45 | AnimBitmap.getRealFrame(I)I | 0x42467b | through frameSequence (if any), then mod nbFrame | high |
 | 46 | PlayField.fillCells(cx,cy,w,h,v)V | 0x427013 | rect clipped to the map, fill with v | high |
-| 47 | PlayField.moveTiles(x1,y1,x2,y2,w,h)V | 0x42712f | **Broken in gensimu.** Clips both rects against the map and picks one of 4 loop directions (jump table 0x427521, case = (x2<x1)*2 + (y2<y1)), but every loop body is `cellSet(x1, j, cellGet(x2, j))` with j = 0..h-1: the column/row counters are never added to the coordinates and the y arguments are unused after clipping. Net effect: column x2 rows [0,h) is copied to column x1, w times. No game in the corpus calls it | high |
+| 47 | PlayField.moveTiles(x1,y1,x2,y2,w,h)V | 0x42712f | **Broken in gensimu.** Clips both rects against the map and picks one of 4 loop directions (jump table 0x427521, case = (x2<x1)*2 + (y2<y1)), but every loop body is `cellSet(x1, j, cellGet(x2, j))` with j = 0..h-1: the column/row counters are never added to the coordinates and the y arguments are unused after clipping. Net effect: column x2 rows [0,h) is copied to column x1, w times. No game in the corpus calls it. **exen-reloaded fixes this**: it moves the whole w×h block from (x2,y2) to (x1,y1) after the same clipping, iterating away from the overlap (tests/c/test_playfield.c) | high |
 | 48 | PlayField.draw(Graphics,x,y)V | 0x427531 | draws tiles in the view window, then z-sorted sprites. See below. charSet or target image without native data: log and **fatal** 0x407a13(0) | high |
 | 49 | PlayField.setCellTile(cx,cy,v)V | 0x426fa8 | bounds-checked store. Negative v becomes `v+(1<<nbBits)` | high |
 | 50 | PlayField.getCellTile(cx,cy)I | 0x426f37 | bounds-checked load. Values >= `(1<<nbBits)-animTileMaxIndex` come back negative. 0 if out of range | high |
@@ -487,7 +487,9 @@ gives the layout of the engine state and of a sprite. Summary:
     b.next, b.prev) and first/last, never the outer neighbours (0x427c2d..0x427c90 and
     0x427d4b..0x427dae). Any swap that is not at both ends of the list corrupts it: e.g. A(z0),
     B(z5), C(z3) leaves A.next = B, B.next = null, so C is no longer drawn (it is still reachable
-    backwards through B.prev). Kept as is in src/core/playfield.c. No corpus game calls addSprite.
+    backwards through B.prev). No corpus game calls addSprite. **exen-reloaded fixes this**: the
+    list is sorted with the same order (ascending z, stable, since the original only swaps on a
+    strictly smaller z) and every neighbour is relinked (tests/c/test_playfield.c).
   - Then each visible sprite is drawn at `(viewX-x+s.x, viewY-y+s.y)` with `s.frame` and
     `s.transform`.
   - Dispatch is by the anim's class CRC32: AnimBitmap (0xe7167d52) goes to native 43, AnimFlash
@@ -519,8 +521,10 @@ gives the layout of the engine state and of a sprite. Summary:
 - AnimFlash is entirely stubbed. getNbFrames=1, getNbLoops=0, getWidth/getHeight return the fields.
 - A divide by zero in getRealFrame when nbFrame == 0 would crash the host (no guard).
 - FX shift effects read the offset array without a bounds check.
-- PlayField.moveTiles copies one column w times instead of moving a block (see #47).
-- PlayField.draw's z sort can drop sprites from the list (see the sprite notes above).
+- PlayField.moveTiles copies one column w times instead of moving a block (see #47). Fixed in
+  exen-reloaded.
+- PlayField.draw's z sort can drop sprites from the list (see the sprite notes above). Fixed in
+  exen-reloaded.
 - addSprite/removeSprite(null) and PlayField.draw with an image lacking native data are fatal
   (0x407a13), not catchable exceptions.
 

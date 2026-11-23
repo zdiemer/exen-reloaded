@@ -12,13 +12,16 @@
  *     source's own blit mode (transparent key, palette, alpha), before the image itself.
  *   - PlayField.draw writes the view-intersected clip into the Graphics object's clip fields
  *     while it draws, and puts the old values back at the end.
- *   - The z sort in PlayField.draw (an in-place cocktail sort of the sprite list) relinks the two
- *     swapped sprites but not their outer neighbours. A swap in the middle of the list leaves a
- *     neighbour pointing at the wrong sprite, so a sprite can drop out of the list (and stop being
- *     drawn) until the list is rebuilt. Reproduced exactly, with a one-time log.
- *   - moveTiles does not move a block: for each of w columns it copies cells (x2, j) to (x1, j)
- *     for j < h, ignoring both y arguments (the loop counters are never added to the
- *     coordinates). Reproduced exactly.
+ Bugs of the original that are fixed (the project's decision; no corpus game depends on them):
+ *   - The z sort in PlayField.draw (an in-place cocktail sort of the sprite list, 0x427b58)
+ *     relinks the two swapped sprites but not their outer neighbours, so a swap in the middle of
+ *     the list can drop a sprite from it. We sort with the same order (ascending z, stable: the
+ *     original only swaps on a strictly smaller z) and relink every neighbour.
+ *   - moveTiles (0x42712f) clips both rectangles and picks a loop direction, but its loop
+ *     bodies never add the loop counters to the coordinates: it copies column x2, rows [0, h),
+ *     to column x1, w times. We move the whole w x h block from (x2, y2) to (x1, y1), in the
+ *     direction that is safe for overlapping rectangles.
+ * Other quirks of the original that are kept:
  *   - Only sprites whose animation is exactly an exen.AnimBitmap are drawn; AnimFlash goes to its
  *     stub draw and any other Animation class is silently skipped.
  *   - haveDisplayableCommand is always true.
@@ -341,10 +344,12 @@ static int n_PlayField_fillCells(ExenVM *vm, uint32_t *a)
     return 0;
 }
 
-/* moveTiles(x1, y1, x2, y2, w, h) 0x42712f. Both rects are clipped against the map and one of
- * four loop directions is picked from the relative position (x2 < x1, y2 < y1), but every loop
- * body is set(x1, j, get(x2, j)) with j counting from 0: the column and row counters are never
- * added to the coordinates. So column x2, rows [0, h), is copied to column x1, w times. */
+/* moveTiles(x1, y1, x2, y2, w, h) 0x42712f: move the w x h block of cells at (x2, y2) to
+ * (x1, y1). The clipping is the original's. The original then picks one of four loop
+ * directions from the relative position but never adds its loop counters to the coordinates
+ * (it copies column x2, rows [0, h), to column x1, w times); we do the block move it intended,
+ * iterating away from the overlap so an overlapping move copies each cell before overwriting
+ * it. */
 static int n_PlayField_moveTiles(ExenVM *vm, uint32_t *a)
 {
     uint32_t *pf = fields(vm, a[0], PC_PLAYFIELD);
@@ -362,99 +367,61 @@ static int n_PlayField_moveTiles(ExenVM *vm, uint32_t *a)
     w = t < wsub(W, x1) ? t : wsub(W, x1);
     t = h < wsub(H, y2) ? h : wsub(H, y2);
     h = t < wsub(H, y1) ? t : wsub(H, y1);
-    (void)y1; (void)y2;
-    for (int32_t i = 0; i < w; i++)
-        for (int32_t j = 0; j < h; j++)
-            cell_set(vm, pf, x1, j, cell_get(vm, pf, x2, j));
+    int dx = x1 > x2 ? -1 : 1, dy = y1 > y2 ? -1 : 1;
+    for (int32_t jj = 0; jj < h; jj++) {
+        int32_t j = dy > 0 ? jj : h - 1 - jj;
+        for (int32_t ii = 0; ii < w; ii++) {
+            int32_t i = dx > 0 ? ii : w - 1 - ii;
+            cell_set(vm, pf, x1 + i, y1 + j, cell_get(vm, pf, x2 + i, y2 + j));
+        }
+    }
     return 0;
 }
 
 /* ============================================================ PlayField sprites */
 
-/* Bound on list walks. The original has none; a list corrupted by the z sort could make it hang. */
+/* Bound on list walks. The original has none; a corrupt list (e.g. from a bad save state) would hang. */
 #define LIST_LIMIT 100000
 
-/* The z sort of PlayField.draw (0x427b58..0x427df0), instruction for instruction. */
-static void sort_sprites(ExenVM *vm, uint32_t *pf)
+/* The z sort of PlayField.draw (0x427b58..0x427df0): ascending z, stable (the original's
+ * cocktail sort only swaps on a strictly smaller z). Unlike the original, which relinks only the
+ * swapped pair and can drop a sprite from the list, every neighbour is relinked. Exposed for the
+ * unit tests. */
+void playfield_sort_sprites(ExenVM *vm, uint32_t *pf)
 {
     int cs = plat_class(vm, PC_SPRITE);
-    if (cs < 0)
+    if (cs < 0 || !pf[PF_FIRST])
         return;
 #define SPR(r) inst(vm, (r), cs)
-    ref_t endF = 0, endB = 0, last = 0;
-    int swapped = 1;
-    long guard = 0;
-    while (swapped > 0) {
-        ref_t cur = endF ? endF : pf[PF_FIRST];
-        last = 0;
-        swapped = 0;
-        /* forward pass: bubble the largest z towards endB */
-        while (SPR(cur)[SP_NEXT] != endB) {
-            ref_t nx = SPR(cur)[SP_NEXT];
-            if (!nx || ++guard > LIST_LIMIT) {
-                plat_warn_once(vm, W_PF_LIST, "PlayField.draw: sprite list corrupt (the original "
-                                              "would crash or hang); sort stopped");
-                return;
-            }
-            uint32_t *c = SPR(cur), *n = SPR(nx);
-            if ((int32_t)n[SP_Z] < (int32_t)c[SP_Z]) {
-                ref_t nn = n[SP_NEXT], cp = c[SP_PREV];
-                n[SP_NEXT] = cur;
-                n[SP_PREV] = cp;
-                c[SP_NEXT] = nn;
-                c[SP_PREV] = nx;
-                /* cp->next and nn->prev are not updated */
-                if (cp || nn)
-                    plat_warn_once(vm, W_PF_SORT, "PlayField.draw: z sort swapped sprites in the "
-                                                  "middle of the list (relinked as the original, "
-                                                  "which can drop a sprite)");
-                if (!cp)
-                    pf[PF_FIRST] = nx;
-                if (!nn)
-                    pf[PF_LAST] = cur;
-                last = cur;
-                swapped++;
-            } else {
-                cur = nx;
-            }
+    enum { MAXS = 1024 };
+    ref_t list[MAXS];
+    int n = 0;
+    for (ref_t cur = pf[PF_FIRST]; cur; cur = SPR(cur)[SP_NEXT]) {
+        if (n == MAXS || !heap_is_object(vm, cur)) {
+            plat_warn_once(vm, W_PF_LIST, "PlayField.draw: sprite list too long or corrupt; "
+                                          "not sorted");
+            return;
         }
-        if (swapped == 0)
-            break;
-        swapped = 0;
-        endB = last;
-        cur = endB;
-        /* backward pass: bubble the smallest z towards endF */
-        while (SPR(cur)[SP_PREV] != endF) {
-            ref_t pv = SPR(cur)[SP_PREV];
-            if (!pv || ++guard > LIST_LIMIT) {
-                plat_warn_once(vm, W_PF_LIST, "PlayField.draw: sprite list corrupt (the original "
-                                              "would crash or hang); sort stopped");
-                return;
-            }
-            uint32_t *c = SPR(cur), *p = SPR(pv);
-            if ((int32_t)c[SP_Z] < (int32_t)p[SP_Z]) {
-                ref_t pn = c[SP_NEXT], pp = p[SP_PREV];
-                c[SP_NEXT] = pv;
-                c[SP_PREV] = pp;
-                p[SP_NEXT] = pn;
-                p[SP_PREV] = cur;
-                /* pp->next and pn->prev are not updated */
-                if (pp || pn)
-                    plat_warn_once(vm, W_PF_SORT, "PlayField.draw: z sort swapped sprites in the "
-                                                  "middle of the list (relinked as the original, "
-                                                  "which can drop a sprite)");
-                if (!pp)
-                    pf[PF_FIRST] = cur;
-                if (!pn)
-                    pf[PF_LAST] = pv;
-                last = cur;
-                swapped++;
-            } else {
-                cur = pv;
-            }
-        }
-        endF = last;
+        list[n++] = cur;
     }
+    /* insertion sort: stable, and nearly free on the already-sorted lists games keep */
+    for (int i = 1; i < n; i++) {
+        ref_t r = list[i];
+        int32_t z = (int32_t)SPR(r)[SP_Z];
+        int j = i;
+        while (j > 0 && (int32_t)SPR(list[j - 1])[SP_Z] > z) {
+            list[j] = list[j - 1];
+            j--;
+        }
+        list[j] = r;
+    }
+    for (int i = 0; i < n; i++) {
+        uint32_t *sp = SPR(list[i]);
+        sp[SP_PREV] = i > 0 ? list[i - 1] : 0;
+        sp[SP_NEXT] = i + 1 < n ? list[i + 1] : 0;
+    }
+    pf[PF_FIRST] = list[0];
+    pf[PF_LAST] = list[n - 1];
 #undef SPR
 }
 
@@ -693,7 +660,7 @@ static int n_PlayField_draw(ExenVM *vm, uint32_t *a)
 
     if (pf[PF_FIRST]) {
         int csp = plat_class(vm, PC_SPRITE);
-        sort_sprites(vm, pf);
+        playfield_sort_sprites(vm, pf);
         long guard = 0;
         for (ref_t s = pf[PF_FIRST]; s && ++guard < LIST_LIMIT && !vm->halted;
              s = inst(vm, s, csp)[SP_NEXT]) {
