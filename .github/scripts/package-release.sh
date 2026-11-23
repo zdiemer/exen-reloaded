@@ -43,6 +43,9 @@ for core in "$build"/exen_reloaded_libretro.dll "$build"/exen_reloaded_libretro.
 done
 [ -f "$root/docs/LIBRETRO.md" ] && cp "$root/docs/LIBRETRO.md" "$dir/libretro/" 2>/dev/null || true
 cp "$root/vendor/gensimu/gensimu.exe" "$dir/"
+# default phone settings (nickname, currency, SMS prices) for new saves; read beside gensimu.exe
+mkdir -p "$dir/flash"
+cp "$root/vendor/gensimu/flash/eeprom.dat" "$dir/flash/"
 cp "$root/vendor/gensimu/PROVENANCE.md" "$dir/gensimu-PROVENANCE.md"
 if [ -f "$root/LICENSE" ]; then
   cp "$root/LICENSE" "$dir/"

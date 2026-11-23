@@ -1,56 +1,102 @@
-# exen-reloaded
+<div align="center">
 
-**Play In-Fusio ExEn mobile phone games on a modern PC, at full speed.**
+<img src="docs/img/banner.svg" alt="exen-reloaded" width="760">
+
+**Play In-Fusio ExEn mobile phone games on your PC, at full speed.**
+
+[![Release](https://img.shields.io/badge/release-v0.1.0-ff2d55?style=flat-square)](https://github.com/zdiemer/exen-reloaded/releases/latest)
+[![Games playable](https://img.shields.io/badge/games%20playable-47%20%2F%2047-ffb02e?style=flat-square)](https://github.com/zdiemer/exen-reloaded-compat)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-8d7f88?style=flat-square)](#download--run)
+[![libretro](https://img.shields.io/badge/libretro-core-8d7f88?style=flat-square)](docs/LIBRETRO.md)
+[![License](https://img.shields.io/badge/license-GPL--2.0-8d7f88?style=flat-square)](LICENSE)
+
+</div>
 
 ExEn ("Execution Engine") was In-Fusio's games platform for European feature phones in
 2002–2004, on handsets from Panasonic, Sagem, Philips, Alcatel and Trium. Games shipped as `.exn`
-files: a compact Java-like bytecode program plus palettised images, tile maps and melodies.
+files: a compact Java-like bytecode program plus palettised images, tile maps and melodies. Some
+were original, many were licensed: Crash Bandicoot, Spyro, Banjo-Kazooie, Tomb Raider, Star Wars,
+Worms, MotoGP, Age of Empires.
 
-The only way to run them today is In-Fusio's own SDK simulator, `gensimu.exe`. It is a 2003 Win32
-program that busy-waits (it keeps a CPU core near 100% while sitting in a menu), runs many games
-at a crawl, and crashes on others. exen-reloaded is a from-scratch, portable reimplementation of
-the ExEn virtual machine and platform, built to replace it.
+exen-reloaded is a from-scratch, portable reimplementation of the ExEn virtual machine and
+platform. It runs every game in the test collection, with sound, save states, gamepads and a
+libretro core, on Windows, Linux and macOS.
 
-> **Status: early.** The VM boots real games headlessly; graphics and the SDL3 frontend are in
-> progress. Progress is tracked in [issues](../../issues) and [milestones](../../milestones).
+<table>
+  <tr>
+    <td align="center"><img src="docs/img/crash.gif" width="303" alt="Crash Bandicoot"><br><sub><b>Crash Bandicoot</b> · <a href="docs/media/crash.mp4">with sound</a></sub></td>
+    <td align="center"><img src="docs/img/starwars.gif" width="303" alt="Star Wars: Episode III"><br><sub><b>Star Wars: Episode III</b> · <a href="docs/media/starwars.mp4">with sound</a></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/img/banjo.gif" width="303" alt="Banjo-Kazooie: Grunty's Revenge Missions"><br><sub><b>Banjo-Kazooie: Grunty's Revenge Missions</b> · <a href="docs/media/banjo.mp4">with sound</a></sub></td>
+    <td align="center"><img src="docs/img/spyro.gif" width="264" alt="Spyro"><br><sub><b>Spyro</b> · <a href="docs/media/spyro.mp4">with sound</a></sub></td>
+  </tr>
+</table>
 
-## Goals
+<table>
+  <tr>
+    <td align="center"><img src="docs/img/tombraider.png" width="250" alt="Tomb Raider"><br><sub><b>Tomb Raider</b></sub></td>
+    <td align="center"><img src="docs/img/mutantalert.png" width="250" alt="Mutant Alert"><br><sub><b>Mutant Alert</b> (raycaster)</sub></td>
+    <td align="center"><img src="docs/img/worms.png" width="212" alt="Worms"><br><sub><b>Worms</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/img/motogp.png" width="190" alt="MotoGP"><br><sub><b>MotoGP</b></sub></td>
+    <td align="center"><img src="docs/img/midtown.png" width="190" alt="Midtown Madness 3"><br><sub><b>Midtown Madness 3</b></sub></td>
+    <td align="center"><img src="docs/img/crazycobra2.png" width="190" alt="Crazy Cobra 2"><br><sub><b>Crazy Cobra 2</b></sub></td>
+  </tr>
+</table>
 
-- Every known `.exn` runs correctly and at the speed the hardware intended.
-- Portable C core with no Windows dependency: Windows, Linux and macOS builds.
-- SDL3 frontend with remappable keyboard and gamepad controls.
-- Save states.
-- A libretro core.
-- A headless harness that sweeps a directory of games and publishes a compatibility list.
+## Why
 
-## How it works
+Until now the only way to run these games was In-Fusio's own SDK simulator, `gensimu.exe`, a
+2003 Win32 debug build. It busy-waits (a CPU core near 100% while sitting in a menu), converts
+every pixel through floating point on every frame, runs games far below the speed they ask for,
+and crashes in others. exen-reloaded sleeps between frames, runs each game at its own timer
+rate, and has run every game it has been given so far.
 
-ExEn games are bytecode for a small Java-like VM. The ExEn framework (`exen.Gamelet`,
-`exen.Graphics`, `exen.Sprite`, `exen.PlayField`, …) is bytecode for that same VM, sitting on a
-thin layer of native functions for drawing, timers, keys, sound and persistent storage.
-exen-reloaded implements the VM and that native layer. It runs the framework bytecode taken from
-the original simulator, so the framework behaves exactly as In-Fusio wrote it.
+<div align="center">
+<img src="docs/img/compare-panko.gif" width="504" alt="Panko in the 2003 simulator and in exen-reloaded"><br>
+<sub><b>Panko</b>, time-aligned: the 2003 simulator (left) stops with <i>An internal error has occurred</i>; exen-reloaded (right) plays on. <a href="docs/media/compare-panko.mp4">Full clip</a>.</sub>
+</div>
 
-The original simulator is vendored in [`vendor/gensimu/`](vendor/gensimu/PROVENANCE.md) for
-preservation and as the reference behaviour. It is abandoned freeware.
+## Download & run
 
-## Repository layout
+1. Download the archive for your system from the
+   [Releases page](https://github.com/zdiemer/exen-reloaded/releases/latest) and unpack it.
+2. Run a game: `exen-reloaded game.exn` (on Windows you can also drag a `.exn` onto
+   `exen-reloaded.exe`).
+
+The archive contains the app, the headless runner `exen-run`, the libretro core (`libretro/`),
+and In-Fusio's original simulator `gensimu.exe`, which exen-reloaded reads the ExEn framework
+from. Keep `gensimu.exe` (and the `flash/` folder, if present) beside the app. No games are
+included; supply your own `.exn` files.
+
+Each game opens at the size of the handset it was made for (from a built-in database of known
+games, else 132x176).
+
+### Command-line options
 
 ```
-docs/          format notes and architecture (start with docs/FORMAT.md)
-src/           the emulator (VM, native layer, frontends)
-tools/         Python helpers; tools/exn.py inspects .exn files
-vendor/gensimu the original In-Fusio simulator, unmodified
+exen-reloaded [options] game.exn
+  --scale N         window scale (default 4)
+  --size WxH        handset screen (default: from the game database)
+  --fullscreen      start fullscreen (F11 toggles)
+  --mute, --volume N
+  --voice V         melody voice: ringtone (default) or piano
+  --sms MODE        server (default), delivered or offline; see SMS below
+  --keys-config PATH, --print-bindings
+  --sim PATH        gensimu.exe, if it is not beside the app
 ```
 
-## Games
+### Hotkeys
 
-No games are included; supply your own `.exn` files. To point the tooling at a local collection,
-copy `local.env.example` to `local.env` (gitignored) and set `EXEN_GAMES_DIR`.
-
-```sh
-python tools/exn.py info "$EXEN_GAMES_DIR"/*.exn
-```
+| Action | Key |
+|---|---|
+| Save state / load state | F5 / F8 |
+| Previous / next state slot (0-9) | F6 / F7 |
+| Mute | M |
+| Melody voice (ring tone / piano) | V |
+| Fullscreen | F11 |
 
 ## Controls
 
@@ -104,6 +150,27 @@ stick and trigger directions are `leftx-`, `lefty+`, `righttrigger` and so on, a
 A section in the file replaces the defaults for that device; a missing section keeps them.
 Invalid entries are logged and skipped. The file's header comment lists every name.
 
+## Saves and save states
+
+Games keep their high scores and progress in the phone's EEPROM (`Gamelet.saveCtx`). The SDL
+frontend keeps one 2048-byte image per game in `saves/<game>.eep` and writes it every time the
+game saves, as the original writes `flash/EEPROM.DAT`. A game seen for the first time starts from
+the settings in the simulator's `flash/eeprom.dat` (nickname, currency, SMS prices) with an empty
+save record.
+
+Save states capture the whole machine. F5 saves to the current slot, F8 loads it, F6 / F7 select
+the slot; the window title shows what happened. Slots are files
+`states/<game>/slot0.exst` .. `slot9.exst`. A state belongs to one game file and one
+`gensimu.exe`; loading one into anything else is refused. A state includes the EEPROM as it was
+when the state was saved, so loading an older state also brings back its saves.
+
+Both directories live beside the program, or in the per-user data directory (as `keys.ini`
+above). `<game>` is the title from the game database, else the CRC-32 of the `.exn` file.
+
+The headless runner can test both: `exen-run --eeprom-out FILE` writes the EEPROM back,
+`--save-at N FILE` and `--load FILE` save and resume states, and `--selftest-state` checks that
+a state round trip reproduces the same frames, audio and final state.
+
 ## Sound
 
 Games play monophonic melodies (`Gamelet.playMelody`), which the core sequences exactly as the
@@ -143,35 +210,58 @@ The SDL frontend takes `--sms server|delivered|offline` (and dates rankings with
 the libretro core has the option "SMS", and `exen-run --sms MODE --sms-log` prints the decoded
 traffic. The server's records and an answer in flight are part of save states; the mode is not.
 
-## Saves and save states
-
-Games keep their high scores and progress in the phone's EEPROM (`Gamelet.saveCtx`). The SDL
-frontend keeps one 2048-byte image per game in `saves/<game>.eep` and writes it every time the
-game saves, as the original writes `flash/EEPROM.DAT`. A game seen for the first time starts from
-the settings in the simulator's `flash/eeprom.dat` (nickname, currency, SMS prices) with an empty
-save record.
-
-Save states capture the whole machine. F5 saves to the current slot, F8 loads it, F6 / F7 select
-the slot; the window title shows what happened. Slots are files
-`states/<game>/slot0.exst` .. `slot9.exst`. A state belongs to one game file and one
-`gensimu.exe`; loading one into anything else is refused. A state includes the EEPROM as it was
-when the state was saved, so loading an older state also brings back its saves.
-
-Both directories live beside the program, or in the per-user data directory (as `keys.ini`
-above). `<game>` is the title from the game database, else the CRC-32 of the `.exn` file.
-
-The headless runner can test both: `exen-run --eeprom-out FILE` writes the EEPROM back,
-`--save-at N FILE` and `--load FILE` save and resume states, and `--selftest-state` checks that
-a state round trip reproduces the same frames, audio and final state.
-
 ## libretro core
 
-exen-reloaded also builds as a libretro core for RetroArch and other frontends
-(`-DEXEN_BUILD_LIBRETRO=ON`, giving `exen_reloaded_libretro`). Copy `vendor/gensimu/gensimu.exe`
-(and optionally `vendor/gensimu/flash/eeprom.dat`, as `flash/eeprom.dat`) into the frontend's
-system directory and load a `.exn`. It supports save files (the EEPROM), save states, rewind,
-run-ahead, core options for the screen size and sound, and the same pad layout as above. See
-[docs/LIBRETRO.md](docs/LIBRETRO.md).
+exen-reloaded also runs as a libretro core in RetroArch and other frontends. Copy `gensimu.exe`
+(and `flash/eeprom.dat`) into the frontend's system directory and load a `.exn`. It supports save
+files (the phone's EEPROM), save states, rewind, run-ahead, and core options for the screen
+size, sound, melody voice and SMS. See [docs/LIBRETRO.md](docs/LIBRETRO.md).
+
+## Compatibility
+
+All 47 games in the test collection run and respond to input: they reach gameplay without the VM
+stopping. Per-game status, with a screenshot and a clip of each run, is tracked in
+[exen-reloaded-compat](https://github.com/zdiemer/exen-reloaded-compat), regenerated by the
+headless harness (`tools/harness/compat.py`). Side-by-side recordings against the original
+simulator are made with `tools/compare/compare.py`.
+
+## How it works
+
+ExEn games are bytecode for a small Java-like VM. The ExEn framework (`exen.Gamelet`,
+`exen.Graphics`, `exen.Sprite`, `exen.PlayField`, ...) is bytecode for that same VM, sitting on
+185 native functions for drawing, images, tile maps, timers, keys, melodies, SMS and persistent
+storage. exen-reloaded implements the VM and every one of those natives in portable C, and runs
+the framework bytecode taken from the original simulator, so the framework behaves exactly as
+In-Fusio wrote it. Where the original was buggy and no game depends on it, the bug is fixed and
+documented.
+
+Everything was reverse-engineered from the original simulator and the games themselves:
+
+- [`docs/FORMAT.md`](docs/FORMAT.md): the `.exn` container
+- [`docs/re/CVP.md`](docs/re/CVP.md): the prelinked class format and name hashes
+- [`docs/re/OPCODES.md`](docs/re/OPCODES.md): the instruction set and execution model
+- [`docs/re/NATIVES.md`](docs/re/NATIVES.md): every native, the porting layer, timing
+- [`docs/re/CODECS.md`](docs/re/CODECS.md): In-Fusio's five image codecs
+- [`docs/re/SMS.md`](docs/re/SMS.md): the SMS protocol
+
+The original simulator is vendored, unmodified, in
+[`vendor/gensimu/`](vendor/gensimu/PROVENANCE.md) for preservation and as the reference
+behaviour. It is abandoned freeware.
+
+## Building from source
+
+```sh
+cmake -S . -B build -G Ninja -DEXEN_BUILD_TESTS=ON -DEXEN_BUILD_LIBRETRO=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+build/exen-reloaded game.exn
+```
+
+Needs CMake 3.20+ and a C11 compiler. SDL3 is used if installed, otherwise fetched and built.
+The core (`src/core/`) is plain C with no OS or SDL dependency; the frontends are `src/sdl/` (the
+app), `src/libretro/` and `src/cli/` (`exen-run`, the headless runner the harness uses).
+Contributor notes are in [`AGENTS.md`](AGENTS.md); work is tracked in
+[issues](https://github.com/zdiemer/exen-reloaded/issues).
 
 ## Legal
 
