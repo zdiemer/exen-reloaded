@@ -175,6 +175,12 @@ a state round trip reproduces the same frames, audio and final state.
 
 ## Sound
 
+ExEn games play one melody at a time, and most keep their music for the title screen and
+between levels: a theme of 10-35 seconds (Crash Bandicoot 21 s, Pikubi 34 s, Jungle Run 15 s),
+then short jingles and effects during play. Some games have no music at all (Spyro,
+Banjo-Kazooie) or only single-note blips (Tomb Raider). That is how the games were written, not
+something missing here.
+
 Games play monophonic melodies (`Gamelet.playMelody`), which the core sequences exactly as the
 original simulator did and synthesises itself, so every frontend sounds the same. There are two
 voices:
