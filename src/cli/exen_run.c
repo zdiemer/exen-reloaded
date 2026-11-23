@@ -252,6 +252,8 @@ static void usage(void)
             "  --wav FILE        render the game's audio to FILE (16-bit stereo WAV) in step\n"
             "                    with the virtual clock\n"
             "  --rate HZ         audio sample rate (default 44100)\n"
+            "  --voice V         melody voice: ringtone (default) or piano (like the GM piano\n"
+            "                    the original simulator played)\n"
             "  --melodies        print each melody the game starts (time and bytes)\n"
             "  --save-at N FILE  write a save state to FILE just before tick N\n"
             "  --load FILE       resume from a state written by --save-at instead of booting;\n"
@@ -267,7 +269,7 @@ static void usage(void)
 typedef struct {
     const uint8_t *sim, *game, *eeprom;
     size_t sl, gl, el;
-    int sw, sh, rate;
+    int sw, sh, rate, voice;
 } Inputs;
 
 static ExenVM *make_vm(const Inputs *in, Run *run)
@@ -295,6 +297,7 @@ static ExenVM *make_vm(const Inputs *in, Run *run)
     }
     if (in->eeprom)
         memcpy(exen_eeprom(vm), in->eeprom, in->el < EXEN_EEPROM_SIZE ? in->el : EXEN_EEPROM_SIZE);
+    exen_audio_set_voice(vm, in->voice);
     return vm;
 }
 
@@ -505,7 +508,7 @@ int main(int argc, char **argv)
     const char *save_path = NULL, *load_path = NULL;
     static Wav wav;
     wav.rate = 44100;
-    int frames = 300, sw = 0, sh = 0, save_at = -1, self = 0;
+    int frames = 300, sw = 0, sh = 0, save_at = -1, self = 0, voice = EXEN_VOICE_RINGTONE;
     Run run = {0};
     run.period = -1;
     run.dump_every = 1;
@@ -519,6 +522,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--wav") && i + 1 < argc) wav_path = argv[++i];
         else if (!strcmp(argv[i], "--rate") && i + 1 < argc) wav.rate = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--melodies")) run.log_melodies = 1;
+        else if (!strcmp(argv[i], "--voice") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "ringtone"))
+                voice = EXEN_VOICE_RINGTONE;
+            else if (!strcmp(v, "piano"))
+                voice = EXEN_VOICE_PIANO;
+            else {
+                usage();
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) run.dump_dir = argv[++i];
         else if (!strcmp(argv[i], "--dump-every") && i + 1 < argc) run.dump_every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) run.scale = atoi(argv[++i]);
@@ -594,7 +608,7 @@ int main(int argc, char **argv)
     }
     printf("title: %s (%s)\nscreen: %dx%d\n", gi.title,
            gi.match == EXEN_GAME_EXACT ? "known" : gi.match ? "known main class" : "unknown game", sw, sh);
-    Inputs in = {simb, gameb, NULL, sl, gl, 0, sw, sh, wav.rate};
+    Inputs in = {simb, gameb, NULL, sl, gl, 0, sw, sh, wav.rate, voice};
     uint8_t *eb = NULL;
     if (eeprom) {
         eb = slurp(eeprom, &in.el);

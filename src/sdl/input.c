@@ -82,7 +82,7 @@ static const char config_header[] =
     ";   2/4/6/8, never to the pad-* codes.\n"
     ";\n"
     "; Keyboard inputs are SDL key names: A, 5, Up, Space, Return, Escape, Keypad 8, Keypad *,\n"
-    "; Left Shift, F1, ... Use \"comma\" for the , key. M, F11 and other hotkeys are not bindable.\n"
+    "; Left Shift, F1, ... Use \"comma\" for the , key. M, V, F11 and other hotkeys are not bindable.\n"
     ";\n"
     "; Gamepad inputs: south, east, west, north (the face buttons by position: A, B, X, Y on an\n"
     "; Xbox pad), dpup, dpdown, dpleft, dpright, start, back, guide, leftshoulder, rightshoulder,\n"

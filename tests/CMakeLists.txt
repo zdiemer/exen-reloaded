@@ -28,3 +28,8 @@ add_test(NAME exen_run_smoke
           "${PROJECT_SOURCE_DIR}/vendor/gensimu/flash/download1.exn")
 set_tests_properties(exen_run_smoke PROPERTIES
   TIMEOUT 120 LABELS smoke PASS_REGULAR_EXPRESSION "status: running")
+
+# test_melody measures pitch and levels with <math.h>
+if(UNIX)
+  target_link_libraries(test_melody PRIVATE m)
+endif()

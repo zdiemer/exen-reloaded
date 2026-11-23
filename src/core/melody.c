@@ -5,11 +5,32 @@
  * into the next pair in the same firing. Here the "timer" is a countdown on the audio clock.
  *
  * Synthesizer: the original sends the notes to the default MIDI device (General MIDI piano at
- * velocity 64). We render a ring-tone style voice instead: a PolyBLEP band-limited square
- * wave with a 3 ms attack, a gentle decay to 60 % and a 12 ms linear release, through a
- * one-pole low-pass. Channel 9 (selected by program change 0) plays filtered noise bursts.
- * The player is monophonic (each event first turns the previous note off), so a few voices
- * cover the overlapping release tails.
+ * velocity 64). The core renders them itself, with two voices that always run side by side
+ * (every note event goes to both pools) while the host setting picks what is heard:
+ *
+ * - Ring tone (default): a PolyBLEP band-limited square wave with a 3 ms attack, a gentle
+ *   decay to 60 % and a 12 ms linear release, through a one-pole low-pass.
+ * - Piano: an approximation of the GM acoustic grand (program 0) as Windows' synth played it.
+ *   Additive: up to PIANO_PARTIALS slightly inharmonic partials (f_n = n f0 sqrt(1 + B n^2)),
+ *   each on two strings detuned by +-0.7 cents (slow beating, the "chorus" of a piano
+ *   unison). Partial levels follow a struck string: |sin(pi n x0)| / n for a hammer at 1/8.3
+ *   of the string, a felt low-pass (a medium blow; the velocity is always 64) and a soundboard
+ *   that radiates little below ~120 Hz, so bass notes are mostly overtones. Each partial
+ *   decays in two stages (prompt sound, then aftersound), faster for higher partials and
+ *   higher notes. Note-off drops the damper: an exponential release of 40-120 ms, so legato
+ *   note changes overlap briefly as on a MIDI synth rather than cutting. A 1.5 ms attack ramp
+ *   and a short band-passed noise burst give the hammer knock. Partials stop below
+ *   min(0.4 * rate, 10 kHz) with a taper, so nothing aliases, and every note is normalised to
+ *   the same loudness. Program changes are tracked but every program plays the piano.
+ *
+ * Channel 9 (selected by program change 0) plays filtered noise bursts in both voices. The
+ * player is monophonic (each event first turns the previous note off), so a few voices per
+ * pool cover the overlapping release tails. A voice switch crossfades over MIX_S; both pools
+ * keep running either way, so the sequencer and the note state never depend on the voice.
+ * Only the oscillators of an unheard pool are skipped (its phases and levels still advance).
+ *
+ * The core links no maths library: the few exponentials and roots are computed here (m_exp,
+ * m_sqrt) and the sine is a polynomial.
  */
 #include <string.h>
 
@@ -37,16 +58,266 @@ static const float SEMI[12] = {8.1757989f,  8.6619572f,  9.1770240f,  9.7227182f
 #define RELEASE_S 0.012f
 #define DRUM_DECAY_S 0.060f
 #define VOICE_GAIN 0.5f /* peak per channel at MIDI volume 0xff; 0x80 gives about -12 dBFS */
+#define MIX_S 0.030f    /* voice switch crossfade */
+
+/* piano voice (see the top of the file) */
+#define PIANO_RMS 0.65f        /* RMS of a note at its onset, before the output gains */
+#define PIANO_ATTACK_S 0.0015f
+#define PIANO_PROMPT 0.55f     /* share of the prompt sound in each partial */
+#define PIANO_NOISE 0.12f      /* hammer noise level */
+#define PIANO_NOISE_S 0.006f
+#define PIANO_SILENT 1e-4f     /* a released note is freed below this summed level */
+#define PIANO_DETUNE 0.0004    /* the two strings of a unison: +-0.7 cents */
+#define PIANO_STRING_A 0.55f
+#define PIANO_STRING_B 0.45f
 
 static Melody *mel(struct ExenVM *vm) { return &vm->plat->melody; }
+
+/* ------------------------------------------------------------------ maths */
+
+/* e^x, to about 1e-15 relative; 0 below -700 */
+static double m_exp(double x)
+{
+    if (x < -700.0)
+        return 0.0;
+    if (x > 700.0)
+        x = 700.0;
+    double kf = x * 1.4426950408889634;
+    int k = (int)(kf < 0.0 ? kf - 0.5 : kf + 0.5);
+    double r = x - (double)k * 0.6931471805599453; /* |r| <= 0.35 */
+    double p = 1.0, t = 1.0;
+    for (int i = 1; i <= 13; i++) {
+        t *= r / (double)i;
+        p += t;
+    }
+    uint64_t bits = (uint64_t)(k + 1023) << 52; /* 2^k */
+    double sc;
+    memcpy(&sc, &bits, sizeof sc);
+    return p * sc;
+}
+
+/* square root of x >= 0 (Newton's method from above) */
+static double m_sqrt(double x)
+{
+    if (x <= 0.0)
+        return 0.0;
+    double y = x > 1.0 ? x : 1.0;
+    for (int i = 0; i < 100; i++) {
+        double n = 0.5 * (y + x / y);
+        if (n >= y)
+            break;
+        y = n;
+    }
+    return y;
+}
+
+/* sin(2 pi p) for p in [0, 1): odd polynomial on [-pi/2, pi/2], error below 4e-6 */
+static float sin1(float p)
+{
+    float x = p < 0.25f ? p : p < 0.75f ? 0.5f - p : p - 1.0f;
+    float y = x * 6.28318531f, y2 = y * y;
+    return y * (1.0f + y2 * (-1.0f / 6.0f + y2 * (1.0f / 120.0f +
+                y2 * (-1.0f / 5040.0f + y2 * (1.0f / 362880.0f)))));
+}
+
+static double note_freq(unsigned note)
+{
+    return (double)SEMI[note % 12] * (double)(1u << (note / 12));
+}
 
 void melody_init(Melody *m, int rate)
 {
     memset(m, 0, sizeof *m);
     m->rate = rate >= 8000 && rate <= 192000 ? rate : 44100;
     m->volume = 100;
+    m->timbre = EXEN_VOICE_RINGTONE;
     m->vol_l = m->vol_r = 0x80;
     m->prev = 0xffff;
+}
+
+/* ------------------------------------------------------------------ piano voice */
+
+/* Per-note coefficients, derived from the note and the output rate. */
+typedef struct PianoParams {
+    int n;                                  /* partials in use */
+    float inc[PIANO_PARTIALS][2];           /* phase increments of the two strings */
+    float d1[PIANO_PARTIALS], d2[PIANO_PARTIALS]; /* per-sample prompt / aftersound decay */
+    float dr[PIANO_PARTIALS];               /* extra per-sample decay once released */
+    float amp[PIANO_PARTIALS];              /* level at the strike */
+    float att;                              /* attack ramp step */
+    float nd, nk1, nk2;                     /* hammer noise decay and band-pass */
+} PianoParams;
+
+/* per-sample factor of an exponential decay with time constant tau seconds */
+static float decay_factor(double tau, double rate) { return (float)m_exp(-1.0 / (tau * rate)); }
+
+static void piano_params(const Melody *m, unsigned note, PianoParams *pp)
+{
+    double rate = (double)m->rate;
+    double f0 = note_freq(note);
+    double oct = ((double)note - 60.0) / 12.0;            /* octaves from middle C */
+    double B = 0.00012 * m_exp(0.40 * oct);               /* inharmonicity */
+    double fmax = 0.40 * rate < 10000.0 ? 0.40 * rate : 10000.0;
+    double tbase = 3.0 * m_exp(-0.35 * oct);              /* aftersound of the fundamental */
+    tbase = tbase < 0.8 ? 0.8 : tbase > 5.0 ? 5.0 : tbase;
+    double trel = 0.07 * m_exp(-0.20 * oct);              /* damper */
+    trel = trel < 0.04 ? 0.04 : trel > 0.12 ? 0.12 : trel;
+    double sum2 = 0.0, peak = 0.0;
+    int n = 0;
+    for (int k = 0; k < PIANO_PARTIALS; k++) {
+        double h = (double)(k + 1);
+        double fn = h * f0 * m_sqrt(1.0 + B * h * h);
+        if (fn >= fmax)
+            break;
+        /* struck string, hammer at 1/8.3 of its length: |sin(pi h x0)| / h */
+        double cyc = h / (2.0 * 8.3);
+        double a = sin1((float)(cyc - (double)(int)cyc));
+        a = (a < 0.0 ? -a : a) / h;
+        a /= 1.0 + (fn / 2400.0) * (fn / 2400.0);         /* felt: a medium blow */
+        a *= fn * fn / (fn * fn + 120.0 * 120.0);         /* soundboard */
+        double taper = (fmax - fn) / (0.2 * fmax);        /* fade out towards the band edge */
+        if (taper < 1.0)
+            a *= taper;
+        double t2 = tbase / (1.0 + fn / 800.0 + (fn / 3000.0) * (fn / 3000.0));
+        pp->inc[k][0] = (float)(fn * (1.0 + PIANO_DETUNE) / rate);
+        pp->inc[k][1] = (float)(fn * (1.0 - PIANO_DETUNE) / rate);
+        pp->d1[k] = decay_factor(0.3 * t2, rate);
+        pp->d2[k] = decay_factor(t2, rate);
+        pp->dr[k] = decay_factor(trel / (1.0 + fn / 2500.0), rate);
+        pp->amp[k] = (float)a;
+        sum2 += a * a;
+        if (a > peak)
+            peak = a;
+        n = k + 1;
+    }
+    /* drop the inaudible top partials, then normalise the loudness */
+    while (n > 1 && pp->amp[n - 1] < 0.002 * peak)
+        n--;
+    double g = sum2 > 0.0 ? PIANO_RMS / m_sqrt(0.5 * sum2) : 0.0;
+    for (int k = 0; k < n; k++)
+        pp->amp[k] = (float)(pp->amp[k] * g);
+    pp->n = n;
+    pp->att = (float)(1.0 / (PIANO_ATTACK_S * rate));
+    pp->nd = decay_factor(PIANO_NOISE_S, rate);
+    double fhi = 3500.0 < 0.35 * rate ? 3500.0 : 0.35 * rate;
+    pp->nk1 = (float)(1.0 - m_exp(-6.283185307179586 * fhi / rate));
+    pp->nk2 = (float)(1.0 - m_exp(-6.283185307179586 * 400.0 / rate));
+}
+
+static float piano_level(const PianoVoice *v)
+{
+    float l = v->ne;
+    for (int k = 0; k < PIANO_PARTIALS; k++)
+        l += v->e1[k] + v->e2[k];
+    return l;
+}
+
+static void piano_off(Melody *m, int ch, unsigned note)
+{
+    for (int i = 0; i < PIANO_VOICES; i++) {
+        PianoVoice *v = &m->piano[i];
+        if (v->state == 1 && v->ch == ch && v->note == note)
+            v->state = 2;
+    }
+}
+
+static void piano_all_off(Melody *m)
+{
+    for (int i = 0; i < PIANO_VOICES; i++)
+        if (m->piano[i].state == 1)
+            m->piano[i].state = 2;
+}
+
+static void piano_on(Melody *m, int ch, unsigned note)
+{
+    if (ch == 9) /* drums: the noise drums of the ring-tone pool play in both voices */
+        return;
+    piano_off(m, ch, note); /* a restrike: the old note rings out under the new one */
+    PianoVoice *v = NULL;
+    for (int i = 0; i < PIANO_VOICES && !v; i++)
+        if (m->piano[i].state == 0)
+            v = &m->piano[i];
+    if (!v) { /* steal the quietest released note (else the quietest one) */
+        float best = 0.0f;
+        for (int i = 0; i < PIANO_VOICES; i++) {
+            PianoVoice *c = &m->piano[i];
+            float l = piano_level(c) + (c->state == 1 ? 1e6f : 0.0f);
+            if (!v || l < best) {
+                v = c;
+                best = l;
+            }
+        }
+    }
+    PianoParams pp;
+    piano_params(m, note, &pp);
+    memset(v, 0, sizeof *v);
+    v->state = 1;
+    v->note = (uint8_t)note;
+    v->ch = (uint8_t)ch;
+    for (int k = 0; k < pp.n; k++) {
+        v->e1[k] = pp.amp[k] * PIANO_PROMPT;
+        v->e2[k] = pp.amp[k] * (1.0f - PIANO_PROMPT);
+        /* Schroeder phases: the same spectrum with a low crest factor, so the note can be as
+         * loud as the ring tone without peaking */
+        uint32_t q = (uint32_t)(k * (k + 1)) % (uint32_t)(2 * pp.n);
+        v->ph[k][0] = v->ph[k][1] = (float)q / (float)(2 * pp.n);
+    }
+    v->noise = 0x1d3bu ^ (note * 0x9e5u);
+    if (!v->noise)
+        v->noise = 1;
+    v->ne = PIANO_NOISE;
+}
+
+/* One sample of a piano note. Levels and phases always advance; the oscillators are only
+ * evaluated when the result is heard. */
+static float piano_sample(PianoVoice *v, const PianoParams *pp, int audible)
+{
+    int rel = v->state == 2;
+    float s = 0.0f, lvl = 0.0f;
+    for (int k = 0; k < pp->n; k++) {
+        float e1 = v->e1[k] * pp->d1[k], e2 = v->e2[k] * pp->d2[k];
+        if (rel) {
+            e1 *= pp->dr[k];
+            e2 *= pp->dr[k];
+        }
+        if (e1 < 1e-9f)
+            e1 = 0.0f; /* no denormals */
+        if (e2 < 1e-9f)
+            e2 = 0.0f;
+        v->e1[k] = e1;
+        v->e2[k] = e2;
+        float a = v->ph[k][0] + pp->inc[k][0], b = v->ph[k][1] + pp->inc[k][1];
+        if (a >= 1.0f)
+            a -= 1.0f;
+        if (b >= 1.0f)
+            b -= 1.0f;
+        v->ph[k][0] = a;
+        v->ph[k][1] = b;
+        float e = e1 + e2;
+        lvl += e;
+        if (audible && e > 0.0f)
+            s += e * (PIANO_STRING_A * sin1(a) + PIANO_STRING_B * sin1(b));
+    }
+    if (v->ne > 0.0f) { /* hammer knock: a band-passed noise burst */
+        v->noise = (v->noise >> 1) ^ ((0u - (v->noise & 1u)) & 0xb400u);
+        float x = (v->noise & 1u) ? 1.0f : -1.0f;
+        v->n1 += (x - v->n1) * pp->nk1;
+        v->n2 += (x - v->n2) * pp->nk2;
+        s += v->ne * (v->n1 - v->n2);
+        v->ne *= pp->nd;
+        if (v->ne < 1e-6f)
+            v->ne = 0.0f;
+        lvl += v->ne;
+    }
+    if (v->att < 1.0f) {
+        v->att += pp->att;
+        if (v->att > 1.0f)
+            v->att = 1.0f;
+        s *= v->att;
+    }
+    if (rel && lvl < PIANO_SILENT)
+        memset(v, 0, sizeof *v);
+    return audible ? s : 0.0f;
 }
 
 /* ------------------------------------------------------------------ voices */
@@ -68,12 +339,14 @@ static void note_off(Melody *m, int ch, unsigned note)
         if (v->state && v->state != 3 && v->ch == ch && v->note == note)
             voice_release(m, v);
     }
+    piano_off(m, ch, note);
 }
 
 static void all_off(Melody *m)
 {
     for (int i = 0; i < MELODY_VOICES; i++)
         voice_release(m, &m->voice[i]);
+    piano_all_off(m);
 }
 
 static void note_on(Melody *m, int ch, unsigned note)
@@ -100,6 +373,7 @@ static void note_on(Melody *m, int ch, unsigned note)
     v->env = 0.0f;
     v->noise = 0xace1u + note;
     v->lp = 0.0f;
+    piano_on(m, ch, note);
 }
 
 /* ------------------------------------------------------------------ sequencer */
@@ -322,20 +596,50 @@ static void synth(Melody *m, int16_t *out, int frames)
     float lpk = 0.45f;                     /* one-pole low-pass, about 4.5 kHz at 44.1 kHz */
     if (m->rate > 44100)
         lpk = 0.45f * 44100.0f / rate;
-    int any = 0;
+    int any = 0, anyp = 0;
     for (int i = 0; i < MELODY_VOICES; i++)
         any |= m->voice[i].state != 0;
+    /* piano coefficients of the sounding notes, for this block */
+    PianoParams pp[PIANO_VOICES];
+    for (int i = 0; i < PIANO_VOICES; i++)
+        if (m->piano[i].state) {
+            piano_params(m, m->piano[i].note, &pp[i]);
+            anyp = 1;
+        }
+    float target = m->timbre == EXEN_VOICE_PIANO ? 1.0f : 0.0f;
+    float mstep = 1.0f / (MIX_S * rate);
+    if (!any && !anyp)
+        m->mix = target; /* nothing sounds: switch at once */
     for (int f = 0; f < frames; f++) {
-        float s = 0.0f;
+        float s = 0.0f, drum = 0.0f, p = 0.0f;
         if (any)
-            for (int i = 0; i < MELODY_VOICES; i++)
-                s += voice_sample(&m->voice[i], att, dec, ddec);
+            for (int i = 0; i < MELODY_VOICES; i++) {
+                MelodyVoice *v = &m->voice[i];
+                if (v->drum)
+                    drum += voice_sample(v, att, dec, ddec);
+                else
+                    s += voice_sample(v, att, dec, ddec);
+            }
+        if (m->mix != target) {
+            m->mix += m->mix < target ? mstep : -mstep;
+            if ((target - m->mix) * (target > 0.5f ? 1.0f : -1.0f) <= 0.0f)
+                m->mix = target;
+        }
+        float mix = m->mix;
+        if (anyp)
+            for (int i = 0; i < PIANO_VOICES; i++)
+                if (m->piano[i].state)
+                    p += piano_sample(&m->piano[i], &pp[i], mix > 0.0f);
+        /* the ring tone and the drums go through the output low-pass; the piano is band-limited
+         * by construction */
+        s = (mix > 0.0f ? s * (1.0f - mix) : s) + drum;
+        p *= mix;
         m->gain_l += (tl - m->gain_l) * smooth;
         m->gain_r += (tr - m->gain_r) * smooth;
         m->lp_l += (s * m->gain_l - m->lp_l) * lpk;
         m->lp_r += (s * m->gain_r - m->lp_r) * lpk;
-        out[2 * f] = clip16(m->lp_l);
-        out[2 * f + 1] = clip16(m->lp_r);
+        out[2 * f] = clip16(m->lp_l + p * m->gain_l);
+        out[2 * f + 1] = clip16(m->lp_r + p * m->gain_r);
     }
 }
 
@@ -372,6 +676,11 @@ int exen_audio_active(ExenVM *vm)
     for (int i = 0; i < MELODY_VOICES; i++)
         if (m->voice[i].state)
             return 1;
+    /* piano tails count only while heard: they ring out while the host renders anyway */
+    if (m->mix > 0.0f || m->timbre == EXEN_VOICE_PIANO)
+        for (int i = 0; i < PIANO_VOICES; i++)
+            if (m->piano[i].state)
+                return 1;
     /* let the output filter settle to silence */
     return m->lp_l > 1.0f || m->lp_l < -1.0f || m->lp_r > 1.0f || m->lp_r < -1.0f;
 }
@@ -380,5 +689,20 @@ void exen_audio_set_volume(ExenVM *vm, int volume)
 {
     mel(vm)->volume = volume < 0 ? 0 : volume > 100 ? 100 : volume;
 }
+
+void exen_audio_set_voice(ExenVM *vm, int voice)
+{
+    Melody *m = mel(vm);
+    m->timbre = voice == EXEN_VOICE_PIANO ? EXEN_VOICE_PIANO : EXEN_VOICE_RINGTONE;
+    int sounding = 0;
+    for (int i = 0; i < MELODY_VOICES; i++)
+        sounding |= m->voice[i].state != 0;
+    for (int i = 0; i < PIANO_VOICES; i++)
+        sounding |= m->piano[i].state != 0;
+    if (!sounding) /* nothing to crossfade */
+        m->mix = m->timbre == EXEN_VOICE_PIANO ? 1.0f : 0.0f;
+}
+
+int exen_audio_voice(ExenVM *vm) { return mel(vm)->timbre; }
 
 int exen_audio_rate(ExenVM *vm) { return mel(vm)->rate; }

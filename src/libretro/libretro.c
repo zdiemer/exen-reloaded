@@ -145,6 +145,7 @@ static struct {
     int apos;                  /* audio frames rendered in the current retro_run */
     int16_t audio[2 * FRAME_SAMPLES];
     int audio_on;
+    int voice;                 /* EXEN_VOICE_*, from the melody voice option */
     uint32_t held;             /* phone keys the VM has been told are down (bit per NPHONE) */
     uint32_t stick;            /* analog stick directions held: bits 0..3 = up, down, left, right */
     uint8_t kb_down[RETROK_LAST];
@@ -199,6 +200,7 @@ static void show_message(enum retro_log_level level, const char *fmt, ...)
 
 #define OPT_SIZE "exen_screen_size"
 #define OPT_AUDIO "exen_audio"
+#define OPT_VOICE "exen_melody_voice"
 
 static const char size_info[] =
     "Handset screen the game runs on. Auto takes it from the built-in game database (132x176 "
@@ -212,10 +214,16 @@ static const char audio_info[] =
     {{"auto", "Auto (game database)"}, {"101x80", NULL}, {"112x112", NULL}, {"120x143", NULL}, \
      {"128x128", NULL}, {"128x141", NULL}, {"128x160", NULL}, {"132x176", NULL}, {NULL, NULL}}
 #define AUDIO_VALUES {{"enabled", NULL}, {"disabled", NULL}, {NULL, NULL}}
+static const char voice_info[] =
+    "How the melodies sound. Ring tone: a square wave, like a 2003 handset. Piano: like the "
+    "original simulator, which played them on the PC's General MIDI piano. Takes effect at once; "
+    "the melodies keep their timing.";
+#define VOICE_VALUES     {{"ringtone", "Ring tone"}, {"piano", "Piano (like the 2003 simulator)"}, {NULL, NULL}}
 
 static struct retro_core_option_v2_definition options_v2[] = {
     {OPT_SIZE, "Screen size", NULL, size_info, NULL, NULL, SIZE_VALUES, "auto"},
     {OPT_AUDIO, "Sound", NULL, audio_info, NULL, NULL, AUDIO_VALUES, "enabled"},
+    {OPT_VOICE, "Melody voice", NULL, voice_info, NULL, NULL, VOICE_VALUES, "ringtone"},
     {NULL, NULL, NULL, NULL, NULL, NULL, {{NULL, NULL}}, NULL},
 };
 static struct retro_core_options_v2 options_v2_set = {NULL, options_v2};
@@ -223,6 +231,7 @@ static struct retro_core_options_v2 options_v2_set = {NULL, options_v2};
 static struct retro_core_option_definition options_v1[] = {
     {OPT_SIZE, "Screen size", size_info, SIZE_VALUES, "auto"},
     {OPT_AUDIO, "Sound", audio_info, AUDIO_VALUES, "enabled"},
+    {OPT_VOICE, "Melody voice", voice_info, VOICE_VALUES, "ringtone"},
     {NULL, NULL, NULL, {{NULL, NULL}}, NULL},
 };
 
@@ -238,6 +247,7 @@ static void set_options(void)
     static const struct retro_variable vars[] = {
         {OPT_SIZE, "Screen size; auto|101x80|112x112|120x143|128x128|128x141|128x160|132x176"},
         {OPT_AUDIO, "Sound; enabled|disabled"},
+        {OPT_VOICE, "Melody voice; ringtone|piano"},
         {NULL, NULL},
     };
     env_cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
@@ -265,12 +275,18 @@ static void wanted_size(int *w, int *h)
     }
 }
 
+/* Sound on/off and the melody voice: host settings, applied live (a voice switch crossfades and
+ * keeps the melody's timing; save states do not store either). */
 static void apply_audio_option(void)
 {
     const char *v = get_option(OPT_AUDIO);
     g.audio_on = !v || strcmp(v, "disabled") != 0;
-    if (g.vm)
+    v = get_option(OPT_VOICE);
+    g.voice = v && !strcmp(v, "piano") ? EXEN_VOICE_PIANO : EXEN_VOICE_RINGTONE;
+    if (g.vm) {
         exen_audio_set_volume(g.vm, g.audio_on ? 100 : 0);
+        exen_audio_set_voice(g.vm, g.voice);
+    }
 }
 
 static void check_options(void)
@@ -466,6 +482,7 @@ static int create_vm(int fresh)
     if (fresh)
         exen_eeprom_reset(vm, g.eep_defaults, g.eep_len); /* -> on_eeprom fills g.sram */
     exen_audio_set_volume(vm, g.audio_on ? 100 : 0);
+    exen_audio_set_voice(vm, g.voice);
     g.state_size = exen_state_max_size(vm) + TRAILER_BYTES;
     return 0;
 }

@@ -20,7 +20,7 @@
  *     +20 u32 code_end    +24 u32 arena size (code + heap): must match the loading VM
  *     +28 u32 payload length   +32 u32 CRC-32 of the payload   +36 u32 0 (reserved)
  *   payload: chunks of { u32 tag, u32 length, data }. The tags below are required once each
- *   (CODE is optional); unknown tags are skipped. Bytes after the payload are ignored.
+ *   (CODE and PIAN are optional); unknown tags are skipped. Bytes after the payload are ignored.
  *
  * Byte images (heap, stack, code) are stored as a run-length code for zeros: records of
  * { u32 zero count, u32 literal count, literal bytes } that exactly fill the image. Free heap
@@ -72,10 +72,15 @@
  *                            LUT is observable and must survive the round trip
  *   normal_video, timer_ms   saved (PLAT); the host's timer is re-armed on load (set_timer)
  *   fb                       saved (PLAT): what the LCD shows; presented on load
- *   melody                   saved (MELO), except the host settings rate, volume and the
- *                            melodies counter. If the loading VM renders at another rate, the
- *                            sample-based timing (wait, oscillator increments, release steps)
- *                            is converted.
+ *   melody                   saved (MELO), except the host settings rate, volume, timbre, mix
+ *                            and the melodies counter. If the loading VM renders at another
+ *                            rate, the sample-based timing (wait, oscillator increments, release
+ *                            steps) is converted.
+ *   melody.piano             saved (PIAN): the piano voice pool runs whichever voice is heard,
+ *                            so it is game state like the ring-tone voices. Optional, so states
+ *                            from before the piano voice still load (its notes start silent) and
+ *                            older cores skip it. Its coefficients are derived from the note and
+ *                            the rate, so a rate change needs no conversion.
  *   cls, warned              class cache and log-once bits, not saved
  * Floats (melody synthesizer) are stored as their IEEE-754 bit patterns. Heap slots are
  * accessed as host uint32_t words (obj_slots), so the arena, and with it a state, is
@@ -101,6 +106,7 @@
 #define T_PLAT TAG('P', 'L', 'A', 'T')
 #define T_EEPR TAG('E', 'E', 'P', 'R')
 #define T_MELO TAG('M', 'E', 'L', 'O')
+#define T_PIAN TAG('P', 'I', 'A', 'N')
 
 /* zero runs shorter than this stay in the literal */
 #define RLE_MIN_ZEROS 16u
@@ -382,6 +388,29 @@ static void write_melody(W *w, const Melody *m)
     w_f32(w, m->lp_r);
 }
 
+static void write_piano(W *w, const Melody *m)
+{
+    w_u32(w, PIANO_VOICES);
+    w_u32(w, PIANO_PARTIALS);
+    for (int i = 0; i < PIANO_VOICES; i++) {
+        const PianoVoice *v = &m->piano[i];
+        w_u32(w, v->state);
+        w_u32(w, v->note);
+        w_u32(w, v->ch);
+        w_f32(w, v->att);
+        for (int k = 0; k < PIANO_PARTIALS; k++) {
+            w_f32(w, v->ph[k][0]);
+            w_f32(w, v->ph[k][1]);
+            w_f32(w, v->e1[k]);
+            w_f32(w, v->e2[k]);
+        }
+        w_u32(w, v->noise);
+        w_f32(w, v->ne);
+        w_f32(w, v->n1);
+        w_f32(w, v->n2);
+    }
+}
+
 static size_t write_state(ExenVM *vm, W *w)
 {
     struct ExenPlatform *p = vm->plat;
@@ -466,6 +495,10 @@ static size_t write_state(ExenVM *vm, W *w)
     write_melody(w, &p->melody);
     chunk_end(w, c);
 
+    c = chunk_begin(w, T_PIAN);
+    write_piano(w, &p->melody);
+    chunk_end(w, c);
+
     size_t total = w->pos;
     w_patch32(w, 28, (uint32_t)(total - HDR_BYTES));
     if (w->buf && total <= w->cap)
@@ -502,6 +535,7 @@ size_t exen_state_max_size(ExenVM *vm)
     n += 8 + EXEN_EEPROM_SIZE;                                      /* EEPR */
     /* MELO: header fields, the melody bytes, program table, voices, output filters */
     n += 8 + 16 * 4 + MELODY_MAX + sizeof p->melody.program + MELODY_VOICES * 10 * 4 + 4 * 4;
+    n += 8 + 2 * 4 + PIANO_VOICES * (8 * 4 + PIANO_PARTIALS * 4 * 4); /* PIAN */
     return n + 256; /* slack for small additions to the chunks above */
 }
 
@@ -779,14 +813,48 @@ static int parse_melody(R *r, Staged *s)
     return r->bad || r->pos != r->len ? -1 : 0;
 }
 
+static int parse_piano(R *r, Staged *s)
+{
+    if (r_u32(r) != PIANO_VOICES || r_u32(r) != PIANO_PARTIALS)
+        return -1;
+    for (int i = 0; i < PIANO_VOICES; i++) {
+        PianoVoice *v = &s->mel.piano[i];
+        uint32_t st = r_u32(r), note = r_u32(r), ch = r_u32(r);
+        if (st > 2 || note > 0x7f || ch > 15)
+            return -1;
+        v->state = (uint8_t)st;
+        v->note = (uint8_t)note;
+        v->ch = (uint8_t)ch;
+        v->att = r_f32(r);
+        for (int k = 0; k < PIANO_PARTIALS; k++) {
+            v->ph[k][0] = r_f32(r);
+            v->ph[k][1] = r_f32(r);
+            v->e1[k] = r_f32(r);
+            v->e2[k] = r_f32(r);
+            /* phases must stay in [0, 1) (the oscillators wrap once per sample) */
+            if (!(v->ph[k][0] >= 0.0f && v->ph[k][0] < 1.0f && v->ph[k][1] >= 0.0f &&
+                  v->ph[k][1] < 1.0f))
+                return -1;
+        }
+        v->noise = r_u32(r);
+        v->ne = r_f32(r);
+        v->n1 = r_f32(r);
+        v->n2 = r_f32(r);
+    }
+    return r->bad || r->pos != r->len ? -1 : 0;
+}
+
 /* The saved melody in the loading VM, converting sample-based timing to its output rate. */
 static void commit_melody(Melody *dst, const Staged *s)
 {
-    int32_t rate = dst->rate, volume = dst->volume;
+    int32_t rate = dst->rate, volume = dst->volume, timbre = dst->timbre;
+    float mix = dst->mix;
     uint32_t melodies = dst->melodies;
     *dst = s->mel;
     dst->rate = rate;
     dst->volume = volume;
+    dst->timbre = timbre;
+    dst->mix = mix;
     dst->melodies = melodies;
     if (rate != s->mel_rate) {
         double k = (double)rate / (double)s->mel_rate;
@@ -842,8 +910,9 @@ int exen_state_load(ExenVM *vm, const void *buf, size_t len)
     /* find the chunks */
     static const uint32_t req[] = {T_VM, T_HEAP, T_STAK, T_PLAT, T_EEPR, T_MELO};
     enum { NREQ = sizeof req / sizeof req[0] };
-    R chunk[NREQ + 1];
-    int have[NREQ + 1] = {0};
+    enum { OPT_CODE = NREQ, OPT_PIAN, NCHUNK };
+    R chunk[NCHUNK];
+    int have[NCHUNK] = {0};
     R top = {b + HDR_BYTES, plen, 0, 0};
     while (top.pos < top.len) {
         uint32_t tag = r_u32(&top), clen = r_u32(&top);
@@ -854,7 +923,9 @@ int exen_state_load(ExenVM *vm, const void *buf, size_t len)
             if (req[i] == tag)
                 k = i;
         if (tag == T_CODE)
-            k = NREQ;
+            k = OPT_CODE;
+        if (tag == T_PIAN)
+            k = OPT_PIAN;
         if (k >= 0) {
             if (have[k]) {
                 top.bad = 1;
@@ -911,11 +982,11 @@ int exen_state_load(ExenVM *vm, const void *buf, size_t len)
             free(tmp);
         }
     }
-    if (!why && have[NREQ]) {
+    if (!why && have[OPT_CODE]) {
         s.code = malloc(vm->code_end);
         if (!s.code)
             why = "load state: out of memory";
-        else if (rle_decode(&chunk[NREQ], s.code, vm->code_end) < 0)
+        else if (rle_decode(&chunk[OPT_CODE], s.code, vm->code_end) < 0)
             why = "load state: bad code data";
     }
     if (!why && parse_plat(vm, &chunk[3], &s) < 0)
@@ -928,6 +999,8 @@ int exen_state_load(ExenVM *vm, const void *buf, size_t len)
     }
     if (!why && parse_melody(&chunk[5], &s) < 0)
         why = "load state: bad melody data";
+    if (!why && have[OPT_PIAN] && parse_piano(&chunk[OPT_PIAN], &s) < 0)
+        why = "load state: bad melody data (piano voice)";
     if (why) {
         staged_free(&s);
         set_err(vm, why);

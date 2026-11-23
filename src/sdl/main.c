@@ -1,7 +1,7 @@
 /* exen-reloaded SDL3 frontend.
  *
  *   exen-reloaded [--sim gensimu.exe] [--scale N] [--size WxH] [--fullscreen]
- *                 [--mute] [--volume N] [--keys-config PATH] game.exn
+ *                 [--mute] [--volume N] [--voice ringtone|piano] [--keys-config PATH] game.exn
  *   exen-reloaded [--keys-config PATH] --print-bindings
  *
  * Pacing is event driven: the thread sleeps in SDL_WaitEventTimeout until the next game tick
@@ -42,7 +42,11 @@ typedef struct {
     uint32_t lut[256];      /* RGB332 -> XRGB8888 as the original display path computes it */
     SDL_AudioStream *audio; /* NULL: no audio device */
     int volume, muted;
+    int voice;              /* EXEN_VOICE_* */
+    uint64_t voice_until_ns; /* the voice shows in the title until then (after V) */
 } App;
+
+#define VOICE_STATUS_MS 2000
 
 #define AUDIO_RATE 48000
 #define AUDIO_TARGET_MS 60
@@ -72,11 +76,27 @@ static void set_title(App *a, const char *name, ExenVM *vm)
     char t[512];
     const char *m = a->muted ? " [muted]" : "";
     const char *st = persist_title(); /* save state slot status (persist.c) */
+    const char *vs = "";
+    if (a->voice_until_ns && SDL_GetTicksNS() < a->voice_until_ns)
+        vs = a->voice == EXEN_VOICE_PIANO ? " [voice: piano]" : " [voice: ring tone]";
     if (exen_halted(vm))
-        SDL_snprintf(t, sizeof t, "%s - stopped: %s%s%s", name, exen_error(vm), m, st);
+        SDL_snprintf(t, sizeof t, "%s - stopped: %s%s%s%s", name, exen_error(vm), m, vs, st);
     else
-        SDL_snprintf(t, sizeof t, "%s - exen-reloaded%s%s", name, m, st);
+        SDL_snprintf(t, sizeof t, "%s - exen-reloaded%s%s%s", name, m, vs, st);
     SDL_SetWindowTitle(a->win, t);
+}
+
+/* ms until the voice status leaves the title, 0 when it just did, -1 if not shown */
+static int voice_title_wait_ms(App *a)
+{
+    if (!a->voice_until_ns)
+        return -1;
+    uint64_t now = SDL_GetTicksNS();
+    if (now >= a->voice_until_ns) {
+        a->voice_until_ns = 0;
+        return 0;
+    }
+    return (int)((a->voice_until_ns - now + 999999u) / 1000000u);
 }
 
 static void build_lut(App *a)
@@ -165,6 +185,8 @@ static void usage(void)
             "  --fullscreen    start fullscreen (F11 toggles)\n"
             "  --mute          start with the sound off (M toggles)\n"
             "  --volume N      sound volume 0-100 (default 100)\n"
+            "  --voice V       melody voice: ringtone (default, a 2003 handset) or piano (like\n"
+            "                  the GM piano the original simulator played; V toggles)\n"
             "  --keys-config PATH\n"
             "                  controls file (default: keys.ini beside the app, or in the user\n"
             "                  data directory if that is not writable; written with the defaults)\n"
@@ -176,7 +198,7 @@ static void usage(void)
             "            Enter = OK/select, Esc/Backspace = clear/back\n"
             "  gamepad:  d-pad/left stick = 2/4/6/8, A = 5, B/Back = clear, Start = OK,\n"
             "            X = *, Y = #, LB/RB = 1/3, LT/RT = 7/9, stick clicks = 0\n"
-            "  hotkeys:  M = mute, F11 = fullscreen,\n"
+            "  hotkeys:  M = mute, V = melody voice, F11 = fullscreen,\n"
             "            F5 = save state, F8 = load state, F6/F7 = previous/next slot (0-9)\n");
 }
 
@@ -185,6 +207,7 @@ int main(int argc, char **argv)
     const char *sim = NULL, *game = NULL;
     const char *keys_config = NULL;
     int scale = 4, w = 0, h = 0, fullscreen = 0, mute = 0, volume = 100, print_bindings = 0;
+    int voice = EXEN_VOICE_RINGTONE;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--sim") && i + 1 < argc) sim = argv[++i];
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
@@ -192,6 +215,14 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--fullscreen")) fullscreen = 1;
         else if (!strcmp(argv[i], "--mute")) mute = 1;
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc) volume = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--voice") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "piano"))
+                voice = EXEN_VOICE_PIANO;
+            else if (!strcmp(v, "ringtone"))
+                voice = EXEN_VOICE_RINGTONE;
+            else { usage(); return 2; }
+        }
         else if (!strcmp(argv[i], "--keys-config") && i + 1 < argc) keys_config = argv[++i];
         else if (!strcmp(argv[i], "--print-bindings")) print_bindings = 1;
         else if (argv[i][0] == '-') { usage(); return 2; }
@@ -236,6 +267,7 @@ int main(int argc, char **argv)
     a.period_ms = -1;
     a.volume = volume;
     a.muted = mute;
+    a.voice = voice;
     a.rgb = calloc((size_t)w * (size_t)h, sizeof *a.rgb);
     build_lut(&a);
     for (int i = 0; i < w * h; i++)
@@ -287,6 +319,7 @@ int main(int argc, char **argv)
         return 1;
     }
     exen_audio_set_volume(vm, a.muted ? 0 : a.volume);
+    exen_audio_set_voice(vm, a.voice);
     /* controls (input.c); gamepads arrive as SDL_EVENT_GAMEPAD_ADDED */
     Input controls;
     input_init(&controls, on_phone_key, vm);
@@ -311,6 +344,11 @@ int main(int argc, char **argv)
             set_title(&a, name, vm);
         else if (status_wait > 0 && (timeout < 0 || status_wait < timeout))
             timeout = status_wait;
+        int voice_wait = voice_title_wait_ms(&a);
+        if (voice_wait == 0)
+            set_title(&a, name, vm);
+        else if (voice_wait > 0 && (timeout < 0 || voice_wait < timeout))
+            timeout = voice_wait;
         SDL_Event ev;
         if (SDL_WaitEventTimeout(&ev, timeout)) {
             do {
@@ -327,6 +365,16 @@ int main(int argc, char **argv)
                         if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
                             a.muted = !a.muted;
                             exen_audio_set_volume(vm, a.muted ? 0 : a.volume);
+                            set_title(&a, name, vm);
+                        }
+                    } else if (ev.key.key == SDLK_V) {
+                        if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
+                            /* a host setting: the switch crossfades, the melody keeps time */
+                            a.voice = a.voice == EXEN_VOICE_PIANO ? EXEN_VOICE_RINGTONE
+                                                                  : EXEN_VOICE_PIANO;
+                            exen_audio_set_voice(vm, a.voice);
+                            a.voice_until_ns = SDL_GetTicksNS() +
+                                               (uint64_t)VOICE_STATUS_MS * 1000000u;
                             set_title(&a, name, vm);
                         }
                     } else if ((hk = persist_hotkey(&ev)) != PERSIST_NONE) { /* F5-F8 */
