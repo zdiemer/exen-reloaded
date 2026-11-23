@@ -6,7 +6,7 @@ corename = "exen-reloaded"
 categories = "Emulator"
 license = "GPLv2"
 permissions = ""
-display_version = "0.1.0-dev"
+display_version = "0.1.0"
 
 # Hardware Information
 manufacturer = "In-Fusio"

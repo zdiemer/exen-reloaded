@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(exen_reloaded C)
+project(exen_reloaded VERSION 0.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -81,6 +81,8 @@ if(EXEN_BUILD_LIBRETRO)
   target_include_directories(exen_core_pic PUBLIC src/core)
   set_target_properties(exen_core_pic PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
   add_library(exen_reloaded_libretro SHARED src/libretro/libretro.c)
+  target_compile_definitions(exen_reloaded_libretro PRIVATE
+    EXEN_LIBRETRO_VERSION="${PROJECT_VERSION}")
   target_link_libraries(exen_reloaded_libretro PRIVATE exen_core_pic)
   set_target_properties(exen_reloaded_libretro PROPERTIES PREFIX "" C_VISIBILITY_PRESET hidden)
   # the core info file goes beside the built core, ready to copy into a frontend
