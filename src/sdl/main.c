@@ -1,8 +1,8 @@
 /* exen-reloaded SDL3 frontend.
  *
  *   exen-reloaded [--sim gensimu.exe] [--scale N] [--size WxH] [--fullscreen]
- *                 [--mute] [--volume N] [--voice ringtone|piano] [--sms MODE]
- *                 [--keys-config PATH] game.exn
+ *                 [--mute] [--volume N] [--voice ringtone|gm] [--soundfont PATH]
+ *                 [--sms MODE] [--keys-config PATH] game.exn
  *   exen-reloaded [--keys-config PATH] --print-bindings
  *
  * Pacing is event driven: the thread sleeps in SDL_WaitEventTimeout until the next game tick
@@ -13,7 +13,8 @@
  * SDL audio stream right after the events that start them, and keeps AUDIO_TARGET_MS queued
  * while a melody plays, waking when the queue falls to AUDIO_LOW_MS. The core therefore stays
  * single-threaded (no lock, no audio callback). When nothing plays, nothing is rendered and
- * the loop does not wake for audio.
+ * the loop does not wake for audio. The General MIDI voice's SoundFont is read once at start
+ * (find_soundfont) and handed to the core.
  *
  * Like the original, a tick that runs late is not repeated: missed ticks are dropped rather
  * than queued, so a slow frame slows the game instead of causing a burst of catch-up ticks.
@@ -79,7 +80,9 @@ static void set_title(App *a, const char *name, ExenVM *vm)
     const char *st = persist_title(); /* save state slot status (persist.c) */
     const char *vs = "";
     if (a->voice_until_ns && SDL_GetTicksNS() < a->voice_until_ns)
-        vs = a->voice == EXEN_VOICE_PIANO ? " [voice: piano]" : " [voice: ring tone]";
+        vs = a->voice != EXEN_VOICE_GM ? " [voice: ring tone]"
+             : exen_audio_soundfont(vm) ? " [voice: General MIDI]"
+                                        : " [voice: General MIDI (no SoundFont: piano)]";
     if (exen_halted(vm))
         SDL_snprintf(t, sizeof t, "%s - stopped: %s%s%s%s", name, exen_error(vm), m, vs, st);
     else
@@ -175,6 +178,26 @@ static const char *find_sim(const char *given)
     return NULL;
 }
 
+/* --soundfont, else TimGM6mb.sf2 in soundfont/ beside the app or beside it, else the source
+ * tree's vendor/soundfont/ (each also relative to the working directory). NULL: none. */
+static const char *find_soundfont(const char *given)
+{
+    static char buf[1024];
+    if (given)
+        return given;
+    const char *base = SDL_GetBasePath();
+    const char *cands[] = {"soundfont/TimGM6mb.sf2", "TimGM6mb.sf2",
+                           "vendor/soundfont/TimGM6mb.sf2", "../vendor/soundfont/TimGM6mb.sf2"};
+    for (size_t i = 0; i < sizeof cands / sizeof *cands; i++) {
+        SDL_snprintf(buf, sizeof buf, "%s%s", base ? base : "", cands[i]);
+        if (SDL_GetPathInfo(buf, NULL))
+            return buf;
+        if (SDL_GetPathInfo(cands[i], NULL))
+            return cands[i];
+    }
+    return NULL;
+}
+
 static void usage(void)
 {
     fprintf(stderr,
@@ -186,8 +209,12 @@ static void usage(void)
             "  --fullscreen    start fullscreen (F11 toggles)\n"
             "  --mute          start with the sound off (M toggles)\n"
             "  --volume N      sound volume 0-100 (default 100)\n"
-            "  --voice V       melody voice: ringtone (default, a 2003 handset) or piano (like\n"
-            "                  the GM piano the original simulator played; V toggles)\n"
+            "  --voice V       melody voice: ringtone (default, a 2003 handset) or gm (General\n"
+            "                  MIDI, like the 2003 simulator; V toggles). \"piano\" = gm\n"
+            "  --soundfont PATH\n"
+            "                  General MIDI SoundFont for the gm voice (default: TimGM6mb.sf2\n"
+            "                  in soundfont/ beside the app, or beside it; without one the gm\n"
+            "                  voice is a piano approximation)\n"
             "  --sms MODE      SMS: server (default; a mock of In-Fusio's SMS server answers),\n"
             "                  delivered (sent, never answered) or offline (not sent)\n"
             "  --keys-config PATH\n"
@@ -208,7 +235,7 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     const char *sim = NULL, *game = NULL;
-    const char *keys_config = NULL;
+    const char *keys_config = NULL, *soundfont = NULL;
     int scale = 4, w = 0, h = 0, fullscreen = 0, mute = 0, volume = 100, print_bindings = 0;
     int voice = EXEN_VOICE_RINGTONE;
     int sms = EXEN_SMS_SERVER; /* --sms */
@@ -221,12 +248,13 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--volume") && i + 1 < argc) volume = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--voice") && i + 1 < argc) {
             const char *v = argv[++i];
-            if (!strcmp(v, "piano"))
-                voice = EXEN_VOICE_PIANO;
+            if (!strcmp(v, "gm") || !strcmp(v, "piano"))
+                voice = EXEN_VOICE_GM;
             else if (!strcmp(v, "ringtone"))
                 voice = EXEN_VOICE_RINGTONE;
             else { usage(); return 2; }
         }
+        else if (!strcmp(argv[i], "--soundfont") && i + 1 < argc) soundfont = argv[++i];
         else if (!strcmp(argv[i], "--sms") && i + 1 < argc) {
             const char *v = argv[++i];
             if (!strcmp(v, "server"))
@@ -334,6 +362,21 @@ int main(int argc, char **argv)
     }
     exen_audio_set_volume(vm, a.muted ? 0 : a.volume);
     exen_audio_set_voice(vm, a.voice);
+    /* the General MIDI voice's SoundFont; the core keeps its own copy */
+    {
+        const char *sf = find_soundfont(soundfont);
+        size_t sfl = 0;
+        void *sfb = sf ? slurp(sf, &sfl) : NULL;
+        if (sfb && exen_audio_set_soundfont(vm, sfb, sfl) == 0)
+            SDL_Log("General MIDI SoundFont: %s", sf);
+        else if (sf)
+            SDL_Log("cannot use the SoundFont %s; the General MIDI voice plays a piano "
+                    "approximation", sf);
+        else
+            SDL_Log("no SoundFont (TimGM6mb.sf2) found; the General MIDI voice plays a piano "
+                    "approximation (see --soundfont)");
+        SDL_free(sfb);
+    }
     /* SMS: the mock server dates its rankings with today's date */
     exen_sms_set_mode(vm, sms);
     {
@@ -392,8 +435,8 @@ int main(int argc, char **argv)
                     } else if (ev.key.key == SDLK_V) {
                         if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
                             /* a host setting: the switch crossfades, the melody keeps time */
-                            a.voice = a.voice == EXEN_VOICE_PIANO ? EXEN_VOICE_RINGTONE
-                                                                  : EXEN_VOICE_PIANO;
+                            a.voice = a.voice == EXEN_VOICE_GM ? EXEN_VOICE_RINGTONE
+                                                               : EXEN_VOICE_GM;
                             exen_audio_set_voice(vm, a.voice);
                             a.voice_until_ns = SDL_GetTicksNS() +
                                                (uint64_t)VOICE_STATUS_MS * 1000000u;

@@ -20,7 +20,7 @@
  *     +20 u32 code_end    +24 u32 arena size (code + heap): must match the loading VM
  *     +28 u32 payload length   +32 u32 CRC-32 of the payload   +36 u32 0 (reserved)
  *   payload: chunks of { u32 tag, u32 length, data }. The tags below are required once each
- *   (CODE, PIAN and SMSV are optional); unknown tags are skipped. Bytes after the payload are ignored.
+ *   (CODE, PIAN, GMSF and SMSV are optional); unknown tags are skipped. Bytes after the payload are ignored.
  *
  * Byte images (heap, stack, code) are stored as a run-length code for zeros: records of
  * { u32 zero count, u32 literal count, literal bytes } that exactly fill the image. Free heap
@@ -75,15 +75,23 @@
  *                            LUT is observable and must survive the round trip
  *   normal_video, timer_ms   saved (PLAT); the host's timer is re-armed on load (set_timer)
  *   fb                       saved (PLAT): what the LCD shows; presented on load
- *   melody                   saved (MELO), except the host settings rate, volume, timbre, mix
- *                            and the melodies counter. If the loading VM renders at another
- *                            rate, the sample-based timing (wait, oscillator increments, release
- *                            steps) is converted.
+ *   melody                   saved (MELO), except the host settings rate, volume, timbre, mix,
+ *                            gm (see below) and the melodies counter. If the loading VM renders
+ *                            at another rate, the sample-based timing (wait, oscillator
+ *                            increments, release steps) is converted.
  *   melody.piano             saved (PIAN): the piano voice pool runs whichever voice is heard,
  *                            so it is game state like the ring-tone voices. Optional, so states
  *                            from before the piano voice still load (its notes start silent) and
  *                            older cores skip it. Its coefficients are derived from the note and
  *                            the rate, so a rate change needs no conversion.
+ *   melody.gm                the SoundFont synth (gm.c), when the host has loaded one: its
+ *                            voices are saved (GMSF, optional; gm_save), tagged with the
+ *                            SoundFont's CRC-32 and the output rate. A VM with the same
+ *                            SoundFont and rate restores them exactly; any other VM restarts
+ *                            them from silence with the current note struck again
+ *                            (melody_gm_restore), so only that voice's audio differs. The
+ *                            SoundFont itself and its channel table are not saved: the channels
+ *                            follow the saved program table.
  *   cls, warned              class cache and log-once bits, not saved
  * Floats (melody synthesizer) are stored as their IEEE-754 bit patterns. Heap slots are
  * accessed as host uint32_t words (obj_slots), so the arena, and with it a state, is
@@ -94,6 +102,7 @@
 #include <string.h>
 
 #include "extnatives.h"
+#include "gm.h"
 #include "natives.h"
 #include "platform.h"
 
@@ -110,6 +119,7 @@
 #define T_EEPR TAG('E', 'E', 'P', 'R')
 #define T_MELO TAG('M', 'E', 'L', 'O')
 #define T_PIAN TAG('P', 'I', 'A', 'N')
+#define T_GMSF TAG('G', 'M', 'S', 'F') /* SoundFont voices (gm.c), optional */
 #define T_SMSV TAG('S', 'M', 'S', 'V') /* mock SMS server (smsserver.c), optional */
 
 /* zero runs shorter than this stay in the literal */
@@ -503,6 +513,14 @@ static size_t write_state(ExenVM *vm, W *w)
     write_piano(w, &p->melody);
     chunk_end(w, c);
 
+    if (p->melody.gm) { /* GMSF: the SoundFont voices, when the host has loaded a SoundFont */
+        uint8_t g[GM_STATE_BYTES];
+        size_t gn = gm_save(p->melody.gm, g, sizeof g);
+        c = chunk_begin(w, T_GMSF);
+        w_bytes(w, g, gn);
+        chunk_end(w, c);
+    }
+
     /* SMSV: the mock SMS server's records and any reply in flight (smsserver.c) */
     {
         uint8_t sv[SMSV_STATE_MAX];
@@ -549,6 +567,7 @@ size_t exen_state_max_size(ExenVM *vm)
     /* MELO: header fields, the melody bytes, program table, voices, output filters */
     n += 8 + 16 * 4 + MELODY_MAX + sizeof p->melody.program + MELODY_VOICES * 10 * 4 + 4 * 4;
     n += 8 + 2 * 4 + PIANO_VOICES * (8 * 4 + PIANO_PARTIALS * 4 * 4); /* PIAN */
+    n += 8 + GM_STATE_BYTES; /* GMSF, whether or not a SoundFont is loaded now */
     n += 8 + SMSV_STATE_MAX; /* SMSV: the mock SMS server (smsserver.c) */
     return n + 256; /* slack for small additions to the chunks above */
 }
@@ -864,7 +883,9 @@ static void commit_melody(Melody *dst, const Staged *s)
     int32_t rate = dst->rate, volume = dst->volume, timbre = dst->timbre;
     float mix = dst->mix;
     uint32_t melodies = dst->melodies;
+    struct GmSynth *gm = dst->gm; /* host-owned, kept */
     *dst = s->mel;
+    dst->gm = gm;
     dst->rate = rate;
     dst->volume = volume;
     dst->timbre = timbre;
@@ -924,7 +945,7 @@ int exen_state_load(ExenVM *vm, const void *buf, size_t len)
     /* find the chunks */
     static const uint32_t req[] = {T_VM, T_HEAP, T_STAK, T_PLAT, T_EEPR, T_MELO};
     enum { NREQ = sizeof req / sizeof req[0] };
-    enum { OPT_CODE = NREQ, OPT_PIAN, NCHUNK };
+    enum { OPT_CODE = NREQ, OPT_PIAN, OPT_GMSF, NCHUNK };
     R chunk[NCHUNK];
     int have[NCHUNK] = {0};
     R top = {b + HDR_BYTES, plen, 0, 0};
@@ -940,6 +961,8 @@ int exen_state_load(ExenVM *vm, const void *buf, size_t len)
             k = OPT_CODE;
         if (tag == T_PIAN)
             k = OPT_PIAN;
+        if (tag == T_GMSF)
+            k = OPT_GMSF;
         if (k >= 0) {
             if (have[k]) {
                 top.bad = 1;
@@ -1086,6 +1109,11 @@ int exen_state_load(ExenVM *vm, const void *buf, size_t len)
     memcpy(p->fb, s.fb, (size_t)p->width * (size_t)p->height);
     memcpy(p->eeprom, s.eeprom, EXEN_EEPROM_SIZE);
     commit_melody(&p->melody, &s);
+    /* the SoundFont voices: exact if saved with this SoundFont and rate, else restarted */
+    if (have[OPT_GMSF])
+        melody_gm_restore(&p->melody, chunk[OPT_GMSF].p, chunk[OPT_GMSF].len);
+    else
+        melody_gm_restore(&p->melody, NULL, 0);
     staged_free(&s);
 
     /* bring the host in line */

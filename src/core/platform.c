@@ -158,8 +158,10 @@ int platform_init(ExenVM *vm, const ExenConfig *cfg)
 
 void platform_free(ExenVM *vm)
 {
-    if (vm->plat)
+    if (vm->plat) {
         free(vm->plat->fb);
+        melody_free(&vm->plat->melody);
+    }
     free(vm->plat);
     vm->plat = NULL;
 }

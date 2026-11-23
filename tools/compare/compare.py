@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Record a game in the original 2003 simulator and in exen-reloaded, side by side.
 
-    python tools/compare/compare.py game.exn out.mp4 [--size 101x80] [--seconds 20] [--voice piano]
+    python tools/compare/compare.py game.exn out.mp4 [--size 101x80] [--seconds 20] [--voice gm]
         [--keys "ms:key,ms:key/hold_ms,..."] [--exen-run build/exen-run.exe]
 
 Windows only (it drives gensimu.exe's window). Needs Pillow.
@@ -252,7 +252,9 @@ def main() -> int:
     ap.add_argument("out", type=Path)
     ap.add_argument("--size", help="handset screen (default: the game's, from exen-run's database, "
                     "or the smallest gensimu profile that holds it)")
-    ap.add_argument("--voice", choices=["ringtone", "piano"], help="melody voice for the audio track")
+    ap.add_argument("--voice", choices=["ringtone", "gm", "piano"],
+                    help="melody voice for the audio track (gm: General MIDI from the vendored "
+                    "SoundFont, like the 2003 simulator; piano is its old name)")
     ap.add_argument("--seconds", type=float, default=20)
     ap.add_argument("--keys", default="")
     ap.add_argument("--gensimu-seconds", type=float, default=180,

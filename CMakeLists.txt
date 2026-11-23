@@ -16,6 +16,7 @@ add_library(exen_core STATIC
   src/core/codec.c
   src/core/extnatives.c
   src/core/fx.c
+  src/core/gm.c
   src/core/graphics.c
   src/core/gamedb.c
   src/core/hash.c
@@ -35,6 +36,12 @@ add_library(exen_core STATIC
   src/core/vec3d.c
 )
 target_include_directories(exen_core PUBLIC src/core)
+# TinySoundFont (vendor/tinysoundfont/PROVENANCE.md), included by src/core/gm.c only
+target_include_directories(exen_core PRIVATE vendor/tinysoundfont)
+# gm.c (TinySoundFont) uses <math.h>
+if(UNIX)
+  target_link_libraries(exen_core PUBLIC m)
+endif()
 
 # Headless runner, used by the compatibility harness.
 add_executable(exen-run src/cli/exen_run.c src/cli/png.c)
@@ -79,6 +86,10 @@ if(EXEN_BUILD_LIBRETRO)
   get_target_property(EXEN_CORE_SOURCES exen_core SOURCES)
   add_library(exen_core_pic STATIC ${EXEN_CORE_SOURCES})
   target_include_directories(exen_core_pic PUBLIC src/core)
+  target_include_directories(exen_core_pic PRIVATE vendor/tinysoundfont)
+  if(UNIX)
+    target_link_libraries(exen_core_pic PUBLIC m)
+  endif()
   set_target_properties(exen_core_pic PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
   add_library(exen_reloaded_libretro SHARED src/libretro/libretro.c)
   target_compile_definitions(exen_reloaded_libretro PRIVATE
@@ -112,6 +123,17 @@ if(EXEN_BUILD_LIBRETRO)
   add_test(NAME libretro_core
     COMMAND exen-libretro-test --frames 300 "${PROJECT_SOURCE_DIR}/vendor/gensimu/flash/download1.exn")
   set_tests_properties(libretro_core PROPERTIES TIMEOUT 300 LABELS smoke)
+  # Again with the General MIDI voice and the vendored SoundFont in a system directory of its
+  # own, so that the SoundFont voice's state round trip and determinism go through libretro too
+  # (the save point falls in the middle of download1.exn's melody).
+  set(EXEN_LR_SYSTEM "${CMAKE_BINARY_DIR}/libretro-system")
+  configure_file(vendor/gensimu/gensimu.exe "${EXEN_LR_SYSTEM}/gensimu.exe" COPYONLY)
+  configure_file(vendor/gensimu/flash/eeprom.dat "${EXEN_LR_SYSTEM}/flash/eeprom.dat" COPYONLY)
+  configure_file(vendor/soundfont/TimGM6mb.sf2 "${EXEN_LR_SYSTEM}/TimGM6mb.sf2" COPYONLY)
+  add_test(NAME libretro_core_gm
+    COMMAND exen-libretro-test --system "${EXEN_LR_SYSTEM}" --option exen_melody_voice=piano
+            --expect-audio --frames 300 "${PROJECT_SOURCE_DIR}/vendor/gensimu/flash/download1.exn")
+  set_tests_properties(libretro_core_gm PROPERTIES TIMEOUT 300 LABELS smoke)
 endif()
 
 # Tests: ctest --test-dir build --output-on-failure. enable_testing() is unconditional so that

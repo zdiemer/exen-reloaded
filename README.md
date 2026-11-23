@@ -69,8 +69,9 @@ rate, and has run every game it has been given so far.
    `exen-reloaded.exe`).
 
 The archive contains the app, the headless runner `exen-run`, the libretro core (`libretro/`),
-and In-Fusio's original simulator `gensimu.exe`, which exen-reloaded reads the ExEn framework
-from. Keep `gensimu.exe` (and the `flash/` folder, if present) beside the app. No games are
+In-Fusio's original simulator `gensimu.exe`, which exen-reloaded reads the ExEn framework
+from, and a General MIDI SoundFont (`soundfont/`) for the melodies (see [Sound](#sound)). Keep
+`gensimu.exe` (and the `flash/` and `soundfont/` folders) beside the app. No games are
 included; supply your own `.exn` files.
 
 Each game opens at the size of the handset it was made for (from a built-in database of known
@@ -84,7 +85,8 @@ exen-reloaded [options] game.exn
   --size WxH        handset screen (default: from the game database)
   --fullscreen      start fullscreen (F11 toggles)
   --mute, --volume N
-  --voice V         melody voice: ringtone (default) or piano
+  --voice V         melody voice: ringtone (default) or gm (General MIDI)
+  --soundfont PATH  General MIDI SoundFont, if not soundfont/TimGM6mb.sf2 beside the app
   --sms MODE        server (default), delivered or offline; see SMS below
   --keys-config PATH, --print-bindings
   --sim PATH        gensimu.exe, if it is not beside the app
@@ -97,7 +99,7 @@ exen-reloaded [options] game.exn
 | Save state / load state | F5 / F8 |
 | Previous / next state slot (0-9) | F6 / F7 |
 | Mute | M |
-| Melody voice (ring tone / piano) | V |
+| Melody voice (ring tone / General MIDI) | V |
 | Fullscreen | F11 |
 
 ## Controls
@@ -186,17 +188,25 @@ original simulator did and synthesises itself, so every frontend sounds the same
 voices:
 
 - **Ring tone** (default): a band-limited square wave, close to what a 2003 handset played.
-- **Piano**: what the original simulator sounded like. It sent the notes to Windows' General
-  MIDI synth, whose default instrument is the acoustic grand piano; this voice approximates it
-  procedurally (no sample files), with the piano's bright attack, decaying overtones and a short
-  release between legato notes.
+- **General MIDI (like the 2003 simulator)**: what the original simulator sounded like. It sent
+  the notes to Windows' General MIDI synth (the Microsoft GS Wavetable synth): the acoustic
+  grand piano at a fixed velocity, unless a melody picks another instrument or the drum kit.
+  This voice sends the same MIDI events, with the same timing, to a General MIDI SoundFont,
+  played by [TinySoundFont](vendor/tinysoundfont/PROVENANCE.md). The releases ship
+  `TimGM6mb.sf2` (5.7 MiB, GPL-2; [provenance and licence](vendor/soundfont/PROVENANCE.md)), a
+  complete GM bank; any other GM SoundFont 2 file works too. Without a SoundFont the voice falls
+  back to a procedural approximation of the GM piano, so it still sounds like a piano.
 
-The SDL frontend starts with `--voice ringtone` or `--voice piano` and switches with V while
+The SDL frontend starts with `--voice ringtone` or `--voice gm` and switches with V while
 playing (the window title shows the voice for a moment); `--mute` / M and `--volume N` set the
-level. The libretro core has the option "Melody voice". The switch crossfades over a few
-milliseconds and never changes the melody's timing. The voice is a player setting: save states
-do not store it. `exen-run --voice piano --wav out.wav game.exn` renders a game's audio with
-either voice.
+level. It loads the SoundFont from `--soundfont PATH`, else `soundfont/TimGM6mb.sf2` or
+`TimGM6mb.sf2` beside the app (in a source tree, `vendor/soundfont/`). The libretro core has the
+option "Melody voice" and reads `TimGM6mb.sf2` from the system directory. The switch crossfades
+over a few milliseconds and never changes the melody's timing. The voice is a player setting:
+save states do not store it. The SoundFont's sounding notes are in save states and restore
+exactly (rewind and run-ahead included) when the same SoundFont is loaded; with another
+SoundFont, or none, they restart at the current note. `exen-run --voice gm --wav out.wav
+game.exn` renders a game's audio with the GM voice (`--soundfont PATH` picks the SoundFont).
 
 ## SMS
 
@@ -221,7 +231,8 @@ traffic. The server's records and an answer in flight are part of save states; t
 ## libretro core
 
 exen-reloaded also runs as a libretro core in RetroArch and other frontends. Copy `gensimu.exe`
-(and `flash/eeprom.dat`) into the frontend's system directory and load a `.exn`. It supports save
+(and `flash/eeprom.dat`, and `TimGM6mb.sf2` for the General MIDI voice) into the frontend's
+system directory and load a `.exn`. It supports save
 files (the phone's EEPROM), save states, rewind, run-ahead, and core options for the screen
 size, sound, melody voice and SMS. See [docs/LIBRETRO.md](docs/LIBRETRO.md).
 

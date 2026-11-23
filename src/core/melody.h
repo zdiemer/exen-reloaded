@@ -3,27 +3,31 @@
  * The sequencer reproduces the original simulator's player (gensimu.exe 0x43b192 / 0x43ad57,
  * docs/re/NATIVES.md §3.2, docs/re/natives/melody.c.txt): one MIDI-style note stream of
  * (note, duration) byte pairs, timed by a periodic timer that each event re-arms. Instead of
- * sending MIDI, the core renders the notes itself, so every frontend produces the same audio.
- * There are two voices (exen_audio_set_voice): a band-limited square "ring tone" (the default,
- * close to a 2003 handset) and a procedural piano approximating the General MIDI grand piano
- * the original simulator played through Windows' synth. Every note event goes to both voice
- * pools, which always run; the host setting only picks (and crossfades) what is heard, so
- * switching never touches the timing.
+ * sending MIDI to the OS, the core renders the notes itself, so every frontend produces the
+ * same audio. There are two voices (exen_audio_set_voice): a band-limited square "ring tone"
+ * (the default, close to a 2003 handset) and General MIDI, what the original simulator played
+ * through Windows' synth: the same MIDI events rendered from a SoundFont (gm.c), or, while the
+ * host has loaded none, a procedural piano approximating GM program 0. Every note event goes to
+ * every voice pool, which always run; the host setting only picks (and crossfades) what is
+ * heard, so switching never touches the timing.
  *
  * All timing runs on the audio clock: the sequencer only advances while the host renders
  * samples (exen_audio_render). The state is plain data (the melody bytes are copied in, no
- * pointers), so a save state can copy the struct as is.
+ * pointers) except the SoundFont synth, a host-owned object that save states handle on their
+ * own (gm.h), so a save state can copy the rest of the struct as is.
  */
 #ifndef EXEN_MELODY_H
 #define EXEN_MELODY_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Longest melody kept, in bytes. The longest in the corpus is 224; longer arrays are cut. */
 #define MELODY_MAX 4096
 #define MELODY_VOICES 3
-/* Piano voice: a monophonic melody needs the sounding note plus the release tails of the
- * last few (legato note changes overlap like on a MIDI synth). Partials per note, at most. */
+/* Procedural piano (the General MIDI voice without a SoundFont): a monophonic melody needs the
+ * sounding note plus the release tails of the last few (legato note changes overlap like on a
+ * MIDI synth). Partials per note, at most. */
 #define PIANO_VOICES 4
 #define PIANO_PARTIALS 16
 
@@ -62,7 +66,7 @@ typedef struct Melody {
     uint8_t cur_dur;        /* duration units of the current pair (0x519fec) */
     uint8_t playing;        /* the player timer is armed and the melody can still sound */
     uint8_t vol_l, vol_r;   /* midiOutSetVolume high bytes, 0x80 at every start */
-    uint8_t program[16];    /* program per channel (tracked, not used by the timbre) */
+    uint8_t program[16];    /* program per channel (the SoundFont voice's instruments) */
     int32_t period_ms;      /* timer period (0x4c6598), at least 10 ms like a USER timer */
     int64_t wait;           /* time until the timer fires, in 1/1000 sample */
 
@@ -76,8 +80,9 @@ typedef struct Melody {
     int32_t rate;           /* output sample rate, Hz */
     int32_t volume;         /* 0..100 */
     int32_t timbre;         /* EXEN_VOICE_*: which voice is heard */
-    float mix;              /* 0 ring tone .. 1 piano, glides towards `timbre` */
+    float mix;              /* 0 ring tone .. 1 General MIDI, glides towards `timbre` */
     uint32_t melodies;      /* melodies started (diagnostics) */
+    struct GmSynth *gm;     /* SoundFont synth (gm.h), NULL: none loaded; owned by the Melody */
 } Melody;
 
 struct ExenVM;
@@ -87,5 +92,11 @@ void melody_init(Melody *m, int rate);
 void melody_play(struct ExenVM *vm, const uint8_t *data, uint32_t len);
 /* EXManufMelodyStop: stop the sequencer and release the sounding note. */
 void melody_stop(struct ExenVM *vm);
+/* Free what melody_init and exen_audio_set_soundfont allocated. */
+void melody_free(Melody *m);
+/* After a state load (state.c): restore the SoundFont voices from a gm_save record (NULL: the
+ * state has none). Without a matching record (another SoundFont or rate, or none saved) they
+ * restart from silence, with the current note struck again. Returns 1 if restored exactly. */
+int melody_gm_restore(Melody *m, const uint8_t *rec, size_t len);
 
 #endif

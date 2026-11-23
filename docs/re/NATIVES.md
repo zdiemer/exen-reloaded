@@ -896,20 +896,33 @@ synthesizes the notes itself instead of using MIDI, with two host-selectable voi
 (`exen_audio_set_voice`):
 - `EXEN_VOICE_RINGTONE` (default): a PolyBLEP square wave, 3 ms attack, decay to 60 % over about
   250 ms, 12 ms release, a one-pole low-pass. Closer to a 2003 handset than the simulator was.
-- `EXEN_VOICE_PIANO`: an approximation of what the simulator actually played. Its notes went to the
-  default MIDI device, on Windows the Microsoft GS Wavetable synth, whose program 0 is the acoustic
-  grand piano, at velocity 64. The voice is procedural (no samples): up to 16 slightly inharmonic
+- `EXEN_VOICE_GM` (formerly `EXEN_VOICE_PIANO`, the same value): what the simulator actually
+  played. Its notes went to the default MIDI device, on Windows the Microsoft GS Wavetable synth,
+  whose program 0 is the acoustic grand piano. With a SoundFont from the host
+  (`exen_audio_set_soundfont`; the releases ship TimGM6mb, `vendor/soundfont/`), the core sends the
+  player's MIDI events to TinySoundFont (`src/core/gm.c`) exactly as the simulator sent them to
+  `midiOutShortMsg`: note-on `0x90|ch, a, 0x40` (velocity 64), the note-off of `prev` on the
+  current channel at the start of every firing (so notes are legato, and the SoundFont's own
+  release overlaps the next note as on the GS synth), program changes `0xC0|ch, b` (b = 0: channel
+  9 and the drum kit, program 0; GM channel 9 is always the drum kit, bank 128; b = 0x80, not a
+  valid MIDI data byte, is taken as program 0, unverified), and the system reset of melody stop and
+  of the end marker (all notes released, programs back to 0). The 0x84/0x85 device volume is the
+  output gain, as `midiOutSetVolume` was. Note-ons reach the synth on the exact sample of the
+  player's timer (10 ms after the start, then 15 ms per duration unit); what is heard starts with
+  the SoundFont sample's own attack (0-3 ms for TimGM6mb's piano).
+  Without a SoundFont the voice is procedural (no samples): up to 16 slightly inharmonic
   partials on two detuned strings each, struck-string partial levels, a two-stage decay that is
   faster for higher partials, a hammer-noise transient, and on note-off a 40-120 ms damper release,
-  so the player's legato note changes (note-off right before the next note-on) overlap briefly as
-  on the MIDI synth. Program changes (0x81) are tracked but every program plays the piano (no game
-  in the corpus sends one).
+  so the player's legato note changes overlap briefly as on the MIDI synth. That fallback plays
+  every program as the piano (no game in the corpus sends a program change) and channel 9 as noise.
 
-Both voice pools receive every note event and always run; the setting only selects (with a 30 ms
+All voice pools receive every note event and always run; the setting only selects (with a 30 ms
 crossfade) what is heard, so switching mid-melody never affects the sequencer. The voice is a host
-setting and is not in save states; the piano pool's state is (optional `PIAN` chunk). The 0x84/0x85
-levels are the L/R gains of both voices. Channel 9 plays noise bursts in either voice. The EEPROM
-sound byte is **not** honoured, because the shipped EEPROM would silence every game; hosts mute with
+setting and is not in save states; the piano pool's state is (optional `PIAN` chunk), and so are
+the SoundFont's voices (optional `GMSF` chunk, restored exactly into a VM with the same SoundFont
+and output rate, else restarted at the current note). The 0x84/0x85 levels are the L/R gains of
+every voice. Channel 9 plays noise bursts in the ring tone. The EEPROM sound byte is **not**
+honoured, because the shipped EEPROM would silence every game; hosts mute with
 `exen_audio_set_volume`.
 
 ---

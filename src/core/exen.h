@@ -109,14 +109,27 @@ int exen_audio_active(ExenVM *vm);
 void exen_audio_set_volume(ExenVM *vm, int volume);
 int exen_audio_rate(ExenVM *vm);
 /* Melody voice, a host setting like the volume (save states neither store nor change it).
- * RINGTONE (the default) is a band-limited square wave, close to a 2003 handset. PIANO
- * approximates what the original simulator played: it sent the notes to Windows' General MIDI
- * synth, whose default program is the acoustic grand piano. Both voices follow the same
- * sequencer, and a switch crossfades over a few ms, so it can be made at any time, mid-note,
- * without a click or any change in timing. Unknown values select RINGTONE. */
-enum { EXEN_VOICE_RINGTONE = 0, EXEN_VOICE_PIANO = 1 };
+ * RINGTONE (the default) is a band-limited square wave, close to a 2003 handset. GM is what
+ * the original simulator played: it sent the notes to Windows' General MIDI synth (program 0,
+ * the acoustic grand piano, unless a melody changes it). The GM voice plays the same MIDI
+ * events from the SoundFont given to exen_audio_set_soundfont; until the host gives one, it is
+ * a procedural approximation of the GM piano. Every voice follows the same sequencer, and a
+ * switch crossfades over a few ms, so it can be made at any time, mid-note, without a click or
+ * any change in timing. Unknown values select RINGTONE. EXEN_VOICE_PIANO is the GM voice's
+ * older name. */
+enum { EXEN_VOICE_RINGTONE = 0, EXEN_VOICE_GM = 1, EXEN_VOICE_PIANO = EXEN_VOICE_GM };
 void exen_audio_set_voice(ExenVM *vm, int voice);
 int exen_audio_voice(ExenVM *vm);
+/* General MIDI SoundFont (SoundFont 2, .sf2) for the GM voice, a host setting. The core parses
+ * `sf2` into its own copy (the buffer may be freed afterwards); about 2 bytes of memory per
+ * byte of 16-bit sample data. Returns 0, or < 0 if the data is not a usable SoundFont (a
+ * SoundFont loaded before stays). sf2 NULL or len 0 unloads it. The SoundFont's notes are part
+ * of save states and restore exactly into a VM with the same SoundFont and output rate; into
+ * any other VM they restart from silence, with the note sounding at that point struck again.
+ * TinySoundFont renders it (vendor/tinysoundfont); its floating-point maths comes from the C
+ * library, so unlike the other voices its samples may differ between platforms. */
+int exen_audio_set_soundfont(ExenVM *vm, const void *sf2, size_t len);
+int exen_audio_soundfont(ExenVM *vm); /* nonzero while a SoundFont is loaded */
 
 /* Persistent storage: the 2048-byte EEPROM image the original keeps in flash/eeprom.dat
  * (layout in docs/re/NATIVES.md §3.1). The config area (network settings, nickname, currency,
@@ -172,8 +185,8 @@ void exen_sms_set_date(ExenVM *vm, int year, int month, int day);
  * the state (len larger than the state) are ignored, so a frontend may append its own data.
  * On load the core restores its clock (getTimerTickCount continues from the saved value,
  * whatever the host's ticks_ms returns), calls set_timer with the restored period, present
- * with the restored screen, and eeprom_changed. Host settings are kept: audio volume and voice,
- * and the output rate (sequencer timing is converted if the rate differs). */
+ * with the restored screen, and eeprom_changed. Host settings are kept: audio volume, voice and
+ * SoundFont, and the output rate (sequencer timing is converted if the rate differs). */
 size_t exen_state_size(ExenVM *vm);
 /* An upper bound on exen_state_size for every state this VM can ever produce, given the loaded
  * game: it depends only on the configuration and the loaded classes, so it stays constant for
