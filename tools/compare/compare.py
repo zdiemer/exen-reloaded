@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Record a game in the original 2003 simulator and in exen-reloaded, side by side.
 
-    python tools/compare/compare.py game.exn out.gif [--size 101x80] [--seconds 20]
+    python tools/compare/compare.py game.exn out.mp4 [--size 101x80] [--seconds 20] [--voice piano]
         [--keys "ms:key,ms:key/hold_ms,..."] [--exen-run build/exen-run.exe]
 
 Windows only (it drives gensimu.exe's window). Needs Pillow.
@@ -47,7 +47,8 @@ VK = {"ok": 0x0D, "clear": 0x1B, "up": 0x26, "down": 0x28, "left": 0x25, "right"
       "6": 0x66, "7": 0x61, "8": 0x62, "9": 0x63, "*": 0x6A, "#": 0x6F}
 
 ZOOM = 2  # simulator.ini ZoomRatio
-FPS = 10
+FPS = 10            # gensimu capture rate (PrintWindow is slow)
+OUT_FPS = 20        # output video rate
 MATCH = 6.0         # mean abs RGB difference (0-255) for two screens to count as the same
 KEY_TIMEOUT = 60.0  # seconds to wait for a matching screen before pressing anyway
 REF_WINDOW = 0.6    # seconds of exen frames before a press that define its screen
@@ -159,7 +160,7 @@ def record_gensimu(game: Path, size: tuple[int, int], seconds: float, keys, work
         proc.kill()
 
 
-def record_exen(exen_run: Path, game: Path, size, seconds: float, keys, work: Path):
+def record_exen(exen_run: Path, game: Path, size, seconds: float, keys, work: Path, voice: str | None = None):
     w, h = size
     probe = subprocess.run([str(exen_run), "--quiet", "--frames", "5", "--size", f"{w}x{h}", str(game)],
                            capture_output=True, text=True)
@@ -169,7 +170,9 @@ def record_exen(exen_run: Path, game: Path, size, seconds: float, keys, work: Pa
     keyspec = ",".join(f"{max(1, ms // period)}:{name}/{max(1, hold // period)}" for ms, name, hold in keys)
     out = work / "exen"
     out.mkdir()
-    cmd = [str(exen_run), "--quiet", "--frames", str(ticks), "--size", f"{w}x{h}", "--dump", str(out)]
+    wav = work / "exen.wav"
+    cmd = [str(exen_run), "--quiet", "--frames", str(ticks), "--size", f"{w}x{h}", "--dump", str(out),
+           "--wav", str(wav)] + (["--voice", voice] if voice else [])
     if keyspec:
         cmd += ["--keys", keyspec]
     res = subprocess.run(cmd + [str(game)], capture_output=True, text=True)
@@ -179,7 +182,7 @@ def record_exen(exen_run: Path, game: Path, size, seconds: float, keys, work: Pa
         frames.append((tick * period / 1000, Image.open(p).convert("RGB").resize((w * ZOOM, h * ZOOM), Image.NEAREST)))
     status = re.search(r"status: (.*)", res.stdout)
     presses = [max(1, ms // period) * period / 1000 for ms, _, _ in keys]
-    return frames, presses, period, status.group(1) if status else "?"
+    return frames, presses, period, status.group(1) if status else "?", (wav if wav.exists() else None)
 
 
 def at(frames, t, size):
@@ -193,20 +196,39 @@ def at(frames, t, size):
     return best or Image.new("RGB", size, "black")
 
 
-def compose(gs, ex, size, seconds, path: Path, labels):
+def write_video(frames, path: Path, fps: int, audio: Path | None = None) -> None:
+    """Write PIL frames as MP4 (H.264, with the audio track if given) or GIF, by extension."""
+    if path.suffix.lower() == ".gif":
+        frames[0].save(path, save_all=True, append_images=frames[1:], duration=int(1000 / fps),
+                       loop=0, optimize=True)
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, f in enumerate(frames):
+            f.save(Path(tmp) / f"{i:06d}.png")
+        cmd = ["ffmpeg", "-loglevel", "error", "-y", "-framerate", str(fps), "-i", str(Path(tmp) / "%06d.png")]
+        if audio:
+            cmd += ["-i", str(audio), "-c:a", "aac", "-b:a", "96k", "-shortest"]
+        # even dimensions for yuv420p; nearest-neighbour keeps the pixels sharp
+        cmd += ["-vf", "scale=trunc(iw*2/2)*2:trunc(ih*2/2)*2:flags=neighbor", "-c:v", "libx264",
+                "-pix_fmt", "yuv420p", "-crf", "18", "-movflags", "+faststart", str(path)]
+        subprocess.run(cmd, check=True)
+
+
+def compose(left, right, size, seconds, labels, fps=OUT_FPS):
+    """Side-by-side frames; left/right are functions from time to image."""
     w, h = size[0] * ZOOM, size[1] * ZOOM
     pad, top = 8, 16
     out = []
-    for i in range(int(seconds * FPS)):
-        t = i / FPS
+    for i in range(int(seconds * fps)):
+        t = i / fps
         frame = Image.new("RGB", (w * 2 + pad * 3, h + top + pad), (24, 24, 28))
         d = ImageDraw.Draw(frame)
         d.text((pad, 2), labels[0], fill=(220, 220, 220))
         d.text((w + pad * 2, 2), labels[1], fill=(220, 220, 220))
-        frame.paste(at(gs, t, (w, h)), (pad, top))
-        frame.paste(at(ex, t, (w, h)), (w + pad * 2, top))
+        frame.paste(left(t), (pad, top))
+        frame.paste(right(t), (w + pad * 2, top))
         out.append(frame)
-    out[0].save(path, save_all=True, append_images=out[1:], duration=int(1000 / FPS), loop=0, optimize=True)
+    return out
 
 
 def warp(frames, presses, other_presses, t):
@@ -224,40 +246,35 @@ def warp(frames, presses, other_presses, t):
     return t
 
 
-def compose_synced(gs, gs_presses, ex, ex_presses, size, seconds, path: Path):
-    w, h = size[0] * ZOOM, size[1] * ZOOM
-    pad, top = 8, 16
-    out = []
-    for i in range(int(seconds * FPS)):
-        t = i / FPS
-        frame = Image.new("RGB", (w * 2 + pad * 3, h + top + pad), (24, 24, 28))
-        d = ImageDraw.Draw(frame)
-        d.text((pad, 2), "gensimu (time-aligned)", fill=(220, 220, 220))
-        d.text((w + pad * 2, 2), "exen-reloaded", fill=(220, 220, 220))
-        frame.paste(at(gs, warp(gs, gs_presses, ex_presses, t), (w, h)), (pad, top))
-        frame.paste(at(ex, t, (w, h)), (w + pad * 2, top))
-        out.append(frame)
-    out[0].save(path, save_all=True, append_images=out[1:], duration=int(1000 / FPS), loop=0, optimize=True)
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("game", type=Path)
     ap.add_argument("out", type=Path)
-    ap.add_argument("--size", default="101x80")
+    ap.add_argument("--size", help="handset screen (default: the game's, from exen-run's database, "
+                    "or the smallest gensimu profile that holds it)")
+    ap.add_argument("--voice", choices=["ringtone", "piano"], help="melody voice for the audio track")
     ap.add_argument("--seconds", type=float, default=20)
     ap.add_argument("--keys", default="")
     ap.add_argument("--gensimu-seconds", type=float, default=180,
                     help="max wall time for the gensimu recording (it runs slower)")
     ap.add_argument("--exen-run", type=Path, default=ROOT / "build/exen-run.exe")
     a = ap.parse_args()
-    size = tuple(int(v) for v in a.size.split("x"))
+    if a.size:
+        size = tuple(int(v) for v in a.size.split("x"))
+    else:
+        probe = subprocess.run([str(a.exen_run), "--quiet", "--frames", "1", str(a.game)],
+                               capture_output=True, text=True)
+        m = re.search(r"screen: (\d+)x(\d+)", probe.stdout)
+        want = (int(m.group(1)), int(m.group(2))) if m else (132, 176)
+        fits = [p for p in PROFILES if p[0] >= want[0] and p[1] >= want[1]]
+        size = want if want in PROFILES else min(fits, key=lambda p: p[0] * p[1]) if fits else (132, 176)
     if size not in PROFILES:
-        raise SystemExit(f"gensimu has no colour profile of size {a.size}; known: {sorted(PROFILES)}")
+        raise SystemExit(f"gensimu has no colour profile of size {size}; known: {sorted(PROFILES)}")
     keys = parse_keys(a.keys)
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        ex, ex_presses, period, status = record_exen(a.exen_run, a.game.resolve(), size, a.seconds, keys, work)
+        ex, ex_presses, period, status, wav = record_exen(a.exen_run, a.game.resolve(), size, a.seconds,
+                                                          keys, work, a.voice)
         # reference frame for each key: what exen-reloaded showed just before the press
         # reference frames for each key: what exen-reloaded showed in the REF_WINDOW before it
         prev = [0.0] + ex_presses[:-1]
@@ -271,9 +288,13 @@ def main() -> int:
             print(f"key {name}@{ms}ms: {len(sig.mask)} stable px{'' if sig.usable else ' (unusable: timed fallback)'}")
         tail = max(3.0, a.seconds - ex_presses[-1]) if ex_presses else a.seconds
         gs, gs_presses, gs_died = record_gensimu(a.game.resolve(), size, a.gensimu_seconds, refs, work, tail)
-        compose(gs, ex, size, a.seconds, a.out, ("gensimu (2003)", "exen-reloaded"))
+        wh = (size[0] * ZOOM, size[1] * ZOOM)
+        exen_at = lambda t: at(ex, t, wh)  # noqa: E731
+        write_video(compose(lambda t: at(gs, t, wh), exen_at, size, a.seconds,
+                            ("gensimu (2003)", "exen-reloaded")), a.out, OUT_FPS, wav)
         synced = a.out.with_name(a.out.stem + "_synced" + a.out.suffix)
-        compose_synced(gs, gs_presses, ex, ex_presses, size, a.seconds, synced)
+        write_video(compose(lambda t: at(gs, warp(gs, gs_presses, ex_presses, t), wh), exen_at, size,
+                            a.seconds, ("gensimu (time-aligned)", "exen-reloaded")), synced, OUT_FPS, wav)
     print(f"{a.out} (real time) and {synced} (time-aligned): gensimu {len(gs)} captures, "
           f"{len(gs_presses)}/{len(keys)} keys pressed{' (process exited)' if gs_died else ''}; "
           f"exen {len(ex)} frames, period {period} ms, {status}")
