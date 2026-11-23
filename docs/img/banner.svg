@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 250" width="1200" height="250" role="img" aria-label="exen-reloaded: In-Fusio ExEn mobile phone games on your PC">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2a0d16"/>
+      <stop offset="0.5" stop-color="#170a12"/>
+      <stop offset="1" stop-color="#08060b"/>
+    </linearGradient>
+    <linearGradient id="hot" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff2d55"/>
+      <stop offset="1" stop-color="#ffb02e"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4b4e5c"/>
+      <stop offset="1" stop-color="#22232b"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2442b6"/>
+      <stop offset="1" stop-color="#6db6ff"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff2d55" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#ff2d55" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="6" height="6" patternUnits="userSpaceOnUse">
+      <rect width="1.2" height="1.2" fill="#ffffff" opacity="0.05"/>
+    </pattern>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="250" rx="18" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1200" height="250" rx="18" fill="url(#dots)"/>
+
+  <!-- LCD scanlines -->
+  <g fill="#ffffff" opacity="0.03">
+    <rect x="0" y="0" width="1200" height="2"/>
+    <rect x="0" y="8" width="1200" height="2"/>
+    <rect x="0" y="16" width="1200" height="2"/>
+    <rect x="0" y="226" width="1200" height="2"/>
+    <rect x="0" y="234" width="1200" height="2"/>
+    <rect x="0" y="242" width="1200" height="2"/>
+  </g>
+
+  <!-- phone -->
+  <ellipse cx="190" cy="125" rx="170" ry="120" fill="url(#halo)"/>
+  <g transform="translate(130 18) rotate(-8 60 107)">
+    <rect x="0" y="0" width="120" height="214" rx="22" fill="url(#body)" stroke="#6b6f80" stroke-width="2"/>
+    <rect x="44" y="9" width="32" height="4" rx="2" fill="#15161c"/>
+    <!-- screen: a tiny 2003-style platformer scene -->
+    <rect x="12" y="22" width="96" height="84" rx="4" fill="#0b0c10"/>
+    <g transform="translate(16 26)">
+      <rect width="88" height="76" fill="url(#sky)"/>
+      <rect x="10" y="10" width="14" height="4" fill="#ffffff" opacity="0.85"/>
+      <rect x="8" y="12" width="20" height="4" fill="#ffffff" opacity="0.85"/>
+      <rect x="56" y="18" width="12" height="4" fill="#ffffff" opacity="0.7"/>
+      <rect x="0" y="60" width="88" height="16" fill="#7a4a1c"/>
+      <rect x="0" y="56" width="88" height="4" fill="#3fbf3f"/>
+      <rect x="58" y="40" width="24" height="4" fill="#ff8c1a"/>
+      <rect x="58" y="44" width="24" height="2" fill="#a34d00"/>
+      <rect x="64" y="32" width="4" height="4" fill="#ffd400"/>
+      <rect x="72" y="32" width="4" height="4" fill="#ffd400"/>
+      <!-- hero -->
+      <rect x="22" y="44" width="8" height="8" fill="#ff2d55"/>
+      <rect x="24" y="40" width="5" height="4" fill="#ffd2a8"/>
+      <rect x="22" y="52" width="3" height="4" fill="#2442b6"/>
+      <rect x="27" y="52" width="3" height="4" fill="#2442b6"/>
+      <rect x="0" y="0" width="88" height="7" fill="#000000" opacity="0.55"/>
+      <rect x="3" y="2" width="12" height="3" fill="#ff2d55"/>
+      <rect x="70" y="2" width="15" height="3" fill="#ffd400"/>
+    </g>
+    <!-- soft keys and navigation -->
+    <rect x="14" y="116" width="26" height="9" rx="4" fill="#5a5e6e"/>
+    <rect x="80" y="116" width="26" height="9" rx="4" fill="#5a5e6e"/>
+    <circle cx="60" cy="122" r="11" fill="#5a5e6e" stroke="#ff2d55" stroke-width="2"/>
+    <!-- keypad 3 x 4 -->
+    <g fill="#3a3d4a" stroke="#62667a" stroke-width="1">
+      <rect x="16" y="140" width="24" height="12" rx="6"/>
+      <rect x="48" y="140" width="24" height="12" rx="6"/>
+      <rect x="80" y="140" width="24" height="12" rx="6"/>
+      <rect x="16" y="157" width="24" height="12" rx="6"/>
+      <rect x="48" y="157" width="24" height="12" rx="6" fill="#ff2d55" stroke="#ff7a93"/>
+      <rect x="80" y="157" width="24" height="12" rx="6"/>
+      <rect x="16" y="174" width="24" height="12" rx="6"/>
+      <rect x="48" y="174" width="24" height="12" rx="6"/>
+      <rect x="80" y="174" width="24" height="12" rx="6"/>
+      <rect x="16" y="191" width="24" height="12" rx="6"/>
+      <rect x="48" y="191" width="24" height="12" rx="6"/>
+      <rect x="80" y="191" width="24" height="12" rx="6"/>
+    </g>
+  </g>
+
+  <!-- wordmark -->
+  <text x="380" y="132" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="92" font-weight="800" letter-spacing="-2" fill="#f4f1f6">exen<tspan fill="url(#hot)">reloaded</tspan></text>
+  <rect x="384" y="150" width="586" height="4" rx="2" fill="url(#hot)" opacity="0.9"/>
+  <text x="384" y="190" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="25" fill="#cdbfc8">In-Fusio ExEn mobile games, 2002–2004, on your PC.</text>
+  <text x="384" y="222" font-family="'Cascadia Mono', Consolas, 'DejaVu Sans Mono', monospace"
+        font-size="17" fill="#8d7f88">full speed · save states · gamepads · libretro · Windows · Linux · macOS</text>
+</svg>
