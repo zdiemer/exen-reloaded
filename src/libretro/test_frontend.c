@@ -665,7 +665,7 @@ int main(int argc, char **argv)
     core.set_input_poll(fe_poll);
     core.set_input_state(fe_input);
     core.init();
-    if (options_v2_set != 3) /* screen size, sound, melody voice */
+    if (options_v2_set != 4) /* screen size, sound, melody voice, SMS */
         printf("FAIL  core options: %d v2 definitions\n", options_v2_set);
 
     char eep_path[1200];
@@ -673,7 +673,7 @@ int main(int argc, char **argv)
     size_t dl = 0;
     uint8_t *defaults = slurp(eep_path, &dl);
 
-    int failed = options_v2_set != 3;
+    int failed = options_v2_set != 4;
     failed += test_missing_system(argv[first]);
     int ngames = 0, nfail = 0;
     for (int i = first; i < argc; i++) {

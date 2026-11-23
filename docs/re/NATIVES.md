@@ -274,7 +274,7 @@ getCharWidth/getCharHeight are bytecode and are not in this range.
 | 75 | Gamelet.getTimerTickCount()I (static) | 0x425090 | `GetTickCount() - base` in **ms** (0x435d3f) | H |
 | 76 | Gamelet.startTimer(I)V | 0x4250a3 | if `ms >= 0`: EXManufSetTimerTick(ms), clamped to 10..60000, then `SetTimer(hwnd,1,ms)` | H |
 | 77 | Gamelet.stopTimer()V | 0x4250ba | `KillTimer(hwnd,1)` | H |
-| 78 | Gamelet.sendSms(LSms;)V | 0x4250c7 | Gets the SMS native buffer (0x42989d) and stores the price index `sms.+0x34` (m_type) at buffer byte 0x8c. If the price is invalid (0x423b1d: the 0x15-byte number at cfg+0x190+0x1c*idx is empty) or there is no network (0x423a00(3): the SIM's MCC/MNC must equal cfg+0x160/+0x162, or both be 0), it stops timer and melody, clears `[0x51f904]+0x1e` and sets VM exit state 3. Otherwise `0x4218d3(buf,1)` sends it via EXManufSmsSend and the result arrives later as Bootstrap.smsSent(status). **Port deviation:** we have no network but do not halt: the core queues `Bootstrap.smsSent(Gamelet.SMS_SENT_UNSUCCESSFULLY)` (static slot 1, 0 from `<clinit>`) and runs it after the current host callback returns (`call_bootstrap`, api.c), the way a handset reports a failed send. Games then show their own "SMS not sent" screen. | H |
+| 78 | Gamelet.sendSms(LSms;)V | 0x4250c7 | Gets the SMS native buffer (0x42989d) and stores the price index `sms.+0x34` (m_type) at buffer byte 0x8c. If the price is invalid (0x423b1d: the 0x15-byte number at cfg+0x190+0x1c*idx is empty) or there is no network (0x423a00(3): the SIM's MCC/MNC must equal cfg+0x160/+0x162, or both be 0), it stops timer and melody, clears `[0x51f904]+0x1e` and sets VM exit state 3. Otherwise `0x4218d3(buf,1)` sends it via EXManufSmsSend and the result arrives later as Bootstrap.smsSent(status). **Port deviation:** we do not halt. The message goes to the core's mock In-Fusio SMS server ([SMS.md](SMS.md)), which decides the status from the host's SMS mode (server / delivered: `SMS_SENT_SUCCESSFULLY`, static slot 2 = 1; offline: `SMS_SENT_UNSUCCESSFULLY`, slot 1 = 0) and may queue an answer for Bootstrap.smsReceived. The core runs smsSent after the current host callback returns (`call_bootstrap`, api.c), never re-entrantly. | H |
 | 79 | Gamelet.saveCtx(B[])V | 0x425156 | Copies min(len,300) bytes into the gamelet's EEPROM record (`0x4153f8`, §3.1). Null is fatal. | H |
 | 80 | Gamelet.loadCtx(B[])V | 0x4251d4 | the reverse (`0x41547b`) | H |
 | 81 | Gamelet.playVibrator()V | 0x4253bc | If EEPROM `cfg+0x15e` is set: `EXManufVibratingDeviceRun(1000)` (0x4065e0(10)), which shakes the window for 1 s | H |
@@ -664,8 +664,9 @@ All values are 16.16. The Matrix3D field +0x18 is an int[16], row-major `m[r*4+c
   (28-byte entries, the value first; 0x423b1d tests a 0x15-byte number string 0x18 bytes before
   it), registration bytes +0x1e..+0x21, nickname +0x66 (16 bytes), home network MCC +0x160 and
   MNC +0x162.
-- **Port:** MCC/MNC 0 (no SIM) and language 1 go into the header. Nothing is ever sent; see native
-  78 for how a send is reported.
+- **Port:** MCC/MNC 0 (no SIM) and language 1 go into the header. Nothing goes over a network:
+  the core's mock SMS server answers instead. The wire format, the receive path and the games'
+  protocol are in [SMS.md](SMS.md).
 - **Catalog** (178-183) in the port: doesGameExist and launchGameIfPresent return false;
   downloadGame does nothing (the original records a launch or download request and exits the VM so
   that the host can act on it); isUserRegistred tests cfg+0x1e..+0x21 (true with the shipped
@@ -730,7 +731,7 @@ the core-side caller and the simulator behaviour.
 | `memcpy/memset/memcmp/strlen`-style helpers | 0x434a23 / 0x434a4e / 0x434a73 / 0x434a9e | 0x4041ca etc. | thin CRT wrappers (EXManufMemCopy, ...; names not logged) | M |
 | `EXManufGetMccMnc(...)` | 0x434ad0 | 0x403eda | From `[Simcard.NNN]` MCC/MNC strings (hex nibbles via 0x434c05) | M |
 | `EXManufGetSIMID(u8 *imsi)` | 0x434c8a | 0x403eef | Builds the IMSI from `[Simcard.current] IMSI1..4` | M |
-| `EXManufSmsSend(...)` | 0x434efe | 0x406514 | `0x434f76`: TCP connect to `[SmsServerConfig] IP:Port` (default 192.168.0.46:5555) and send the 140-byte SMS with TPOA `nb_phone`. Then posts the result event (0x436f58). | M |
+| `EXManufSmsSend(...)` | 0x434efe | 0x406514 | `0x434f76`: with `[SmsServerConfig] Activate=0`, reports success without a network. Otherwise TCP connect to `IP:Port` (default 192.168.0.46:5555), send 17 bytes (`nb_phone`, then `Port_bind`), read a 1-byte ack (0 = ok), send the 140-byte message ("EXEN" + payload). Posts event 0x101 with 1 (sent) or 2 (failed). Details in [SMS.md](SMS.md). | H |
 | SMS receive server | 0x4351f8, thread 0x435396 | WinMain init 0x438c6a | TCP listen on `Port_bind` (default 5556, incremented until bind succeeds). The thread does **blocking** accept/recv (no CPU burn) and hands 0x8c bytes to `0x43544d`, which queues an "SMS received" event polled by `0x438840` (`0x434eaf/0x434e50`) and delivered as ExEn event 0x100 (`onSmsReceived`). | M |
 | `EXManufSocketCreate/Bind/Close/Sendto/Recvfrom/Ntohs/Htons` | 0x4354c0, 0x4354fa, 0x435658, 0x435697, 0x4356d1, 0x4357a9, 0x4357cb | (none: unused by this framework) | Winsock UDP wrappers. Bind starts a recvfrom thread (0x435582). | M |
 | periodic-callback thread `(fn, period)` | 0x4357ed, thread 0x435861 | (none: **dead code**) | `while(1){ if (timeGetTime() >= next) { next += period; fn(); } }` with **no Sleep**. It would pin a core, but nothing references it (no calls, no data pointers). | H |

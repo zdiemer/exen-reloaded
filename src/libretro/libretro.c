@@ -201,6 +201,7 @@ static void show_message(enum retro_log_level level, const char *fmt, ...)
 #define OPT_SIZE "exen_screen_size"
 #define OPT_AUDIO "exen_audio"
 #define OPT_VOICE "exen_melody_voice"
+#define OPT_SMS "exen_sms"
 
 static const char size_info[] =
     "Handset screen the game runs on. Auto takes it from the built-in game database (132x176 "
@@ -219,11 +220,18 @@ static const char voice_info[] =
     "original simulator, which played them on the PC's General MIDI piano. Takes effect at once; "
     "the melodies keep their timing.";
 #define VOICE_VALUES     {{"ringtone", "Ring tone"}, {"piano", "Piano (like the 2003 simulator)"}, {NULL, NULL}}
+static const char sms_info[] =
+    "What happens to the SMS a game sends (scores for a ranking, \"Your opinion\" votes, "
+    "continues, unlocks). Server: a mock of In-Fusio's SMS server receives them and answers "
+    "like the real one (rankings hold only your own scores). Delivered: they are sent but never "
+    "answered. Offline: they fail, as with no network.";
+#define SMS_VALUES                                                                             {{"server", "Mock server"}, {"delivered", "Delivered, no reply"}, {"offline", "Offline"},      {NULL, NULL}}
 
 static struct retro_core_option_v2_definition options_v2[] = {
     {OPT_SIZE, "Screen size", NULL, size_info, NULL, NULL, SIZE_VALUES, "auto"},
     {OPT_AUDIO, "Sound", NULL, audio_info, NULL, NULL, AUDIO_VALUES, "enabled"},
     {OPT_VOICE, "Melody voice", NULL, voice_info, NULL, NULL, VOICE_VALUES, "ringtone"},
+    {OPT_SMS, "SMS", NULL, sms_info, NULL, NULL, SMS_VALUES, "server"},
     {NULL, NULL, NULL, NULL, NULL, NULL, {{NULL, NULL}}, NULL},
 };
 static struct retro_core_options_v2 options_v2_set = {NULL, options_v2};
@@ -232,6 +240,7 @@ static struct retro_core_option_definition options_v1[] = {
     {OPT_SIZE, "Screen size", size_info, SIZE_VALUES, "auto"},
     {OPT_AUDIO, "Sound", audio_info, AUDIO_VALUES, "enabled"},
     {OPT_VOICE, "Melody voice", voice_info, VOICE_VALUES, "ringtone"},
+    {OPT_SMS, "SMS", sms_info, SMS_VALUES, "server"},
     {NULL, NULL, NULL, {{NULL, NULL}}, NULL},
 };
 
@@ -248,6 +257,7 @@ static void set_options(void)
         {OPT_SIZE, "Screen size; auto|101x80|112x112|120x143|128x128|128x141|128x160|132x176"},
         {OPT_AUDIO, "Sound; enabled|disabled"},
         {OPT_VOICE, "Melody voice; ringtone|piano"},
+        {OPT_SMS, "SMS; server|delivered|offline"},
         {NULL, NULL},
     };
     env_cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
@@ -289,12 +299,27 @@ static void apply_audio_option(void)
     }
 }
 
+/* SMS mode (exen.h): a host setting, applied at any time. The mock server's date stays at its
+ * default: the core does not read the host clock, so replies are the same on every run. */
+static void apply_sms_option(void)
+{
+    const char *v = get_option(OPT_SMS);
+    int mode = EXEN_SMS_SERVER;
+    if (v && !strcmp(v, "delivered"))
+        mode = EXEN_SMS_DELIVERED;
+    else if (v && !strcmp(v, "offline"))
+        mode = EXEN_SMS_OFFLINE;
+    if (g.vm)
+        exen_sms_set_mode(g.vm, mode);
+}
+
 static void check_options(void)
 {
     bool updated = false;
     if (!env_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) || !updated)
         return;
     apply_audio_option();
+    apply_sms_option();
     int w, h;
     wanted_size(&w, &h);
     if (w != g.w || h != g.h)
@@ -483,6 +508,7 @@ static int create_vm(int fresh)
         exen_eeprom_reset(vm, g.eep_defaults, g.eep_len); /* -> on_eeprom fills g.sram */
     exen_audio_set_volume(vm, g.audio_on ? 100 : 0);
     exen_audio_set_voice(vm, g.voice);
+    apply_sms_option();
     g.state_size = exen_state_max_size(vm) + TRAILER_BYTES;
     return 0;
 }

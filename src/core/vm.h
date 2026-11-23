@@ -27,6 +27,7 @@
 
 #include "exen.h"
 #include "natives_gen.h"
+#include "smsserver.h"
 
 #define EXEN_NATIVE_SLOTS EXEN_NATIVE_COUNT
 
@@ -155,6 +156,9 @@ struct ExenVM {
         int32_t sms_status;
         int delivering;     /* api.c is running a queued delivery */
     } ext;
+
+    /* The mock SMS server (smsserver.c): plain data, zero-initialised (server mode). */
+    ExSmsServer smsv;
 
     /* The VM clock (Gamelet.getTimerTickCount) is host.ticks_ms() + clock_offset; a state load
      * sets the offset so that the clock continues from the saved value (state.c). */

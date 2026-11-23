@@ -133,6 +133,27 @@ uint8_t *exen_eeprom(ExenVM *vm);
  * opened with File/Open. Calls ExenHost.eeprom_changed. */
 void exen_eeprom_reset(ExenVM *vm, const uint8_t *defaults, size_t len);
 
+/* SMS (docs/re/SMS.md). Most games send SMS through In-Fusio's server: scores for a world
+ * ranking, ranking requests, "Your opinion" votes, pay-per-use continues, unlocks and
+ * downloads. The original simulator forwarded them to a separate In-Fusio PC tool; the core
+ * mocks that server instead. A host setting, like the volume (save states neither store nor
+ * change it; the server's records and a reply in flight are game state and are saved):
+ *   EXEN_SMS_SERVER (default): every SMS is reported as sent, and requests that have an answer
+ *     get the most generous valid one about 2 s later on the VM clock (the score is ranked,
+ *     the unlock granted, ...), delivered through Gamelet.onSmsReceived after a host call.
+ *     The rankings and votes hold only what this player sent.
+ *   EXEN_SMS_DELIVERED: reported as sent, never answered (the simulator with its SMS server
+ *     link deactivated, [SmsServerConfig] Activate=0).
+ *   EXEN_SMS_OFFLINE: reported as not sent (no network; the simulator with no server).
+ * Unknown values select EXEN_SMS_SERVER. Every SMS is logged in one line through
+ * ExenHost.log; exen_sms_set_log(vm, 1) adds a hex dump of each message. exen_sms_set_date
+ * gives the server's date for ranking replies (default 2004-01-01; invalid dates reset it). */
+enum { EXEN_SMS_SERVER = 0, EXEN_SMS_DELIVERED = 1, EXEN_SMS_OFFLINE = 2 };
+void exen_sms_set_mode(ExenVM *vm, int mode);
+int exen_sms_mode(ExenVM *vm);
+void exen_sms_set_log(ExenVM *vm, int verbose);
+void exen_sms_set_date(ExenVM *vm, int year, int month, int day);
+
 /* Save states.
  *
  * A state captures everything the game can observe: the VM arena (heap and class statics), the

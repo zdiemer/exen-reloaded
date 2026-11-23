@@ -29,6 +29,7 @@ add_library(exen_core STATIC
   src/core/raycast.c
   src/core/resource.c
   src/core/sms.c
+  src/core/smsserver.c
   src/core/state.c
   src/core/ui.c
   src/core/vec3d.c

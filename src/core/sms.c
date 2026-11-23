@@ -10,9 +10,12 @@
  *
  * Deviations, all because we have no network, no SIM and no catalog (docs/re/NATIVES.md §2.4):
  * - sendSms does not end the VM (the simulator stops the timer and the melody and exits with
- *   state 3 when the network check fails). It reports a failed send the way a handset does:
- *   Bootstrap.smsSent(Gamelet.SMS_SENT_UNSUCCESSFULLY), queued and delivered by the core after
- *   the current host callback returns (call_bootstrap in api.c), never re-entrantly.
+ *   state 3 when the network check fails). The SMS goes to the mock In-Fusio server
+ *   (smsserver.c, docs/re/SMS.md), which decides the Bootstrap.smsSent status from the host's
+ *   SMS mode and may answer later through Bootstrap.smsReceived. The status is queued and
+ *   delivered by the core after the current host callback returns (call_bootstrap in api.c),
+ *   never re-entrantly. The platform's finishing touches (container length, statistics block
+ *   0x41, end byte, checksum: 0x4218d3) only matter on the wire and are not applied.
  * - The SMS header's MCC/MNC are 0 and the language id is 1 (English).
  * - setNickName and Catalog.doEditBox open a modal edit box in the original (a busy-waiting
  *   PeekMessage loop). We do not block: they leave the stored value as it is and log once.
@@ -26,9 +29,10 @@
 /* exen.Sms instance slots (tools/cvp.py dump) */
 enum { SMS_SIZE, SMS_IDGAME, SMS_BUF, SMS_POS, SMS_TAG, SMS_LENGTH, SMS_OFFSET, SMS_TYPE };
 
-#define GL_SMS_SENT_UNSUCCESSFULLY 1 /* exen.Gamelet static slot (tools/cvp.py dump) */
+#define GL_SMS_SENT_UNSUCCESSFULLY 1 /* exen.Gamelet static slots (tools/cvp.py dump) */
+#define GL_SMS_SENT_SUCCESSFULLY 2
 
-enum { WARN_NICK, WARN_EDITBOX, WARN_SMS, WARN_CATALOG };
+enum { WARN_NICK, WARN_EDITBOX, WARN_CATALOG };
 
 /* ------------------------------------------------------------ native SMS buffer */
 
@@ -412,7 +416,11 @@ static int n_getPrice(ExenVM *vm, uint32_t *a) /* 0x429e0a, price format 0x422e5
 
 /* ------------------------------------------------------------ Gamelet */
 
-/* sendSms(Sms) 0x4250c7 */
+/* sendSms(Sms) 0x4250c7. The original finalises the message and sends it to the In-Fusio
+ * server; the result comes back later as Bootstrap.smsSent(status). We hand it to the mock
+ * server (smsserver.c), which says whether the send succeeds (per the host's SMS mode) and may
+ * queue an answer. The status is queued here and delivered by the core after the current host
+ * callback returns (call_bootstrap in api.c), never re-entrantly. */
 static int n_sendSms(ExenVM *vm, uint32_t *a)
 {
     SmsBuf s;
@@ -420,11 +428,13 @@ static int n_sendSms(ExenVM *vm, uint32_t *a)
         return 0; /* the original does nothing without a buffer */
     /* the price index goes into the buffer's last payload word before the send */
     wr32(s.b + 0x8c, sms_fields(vm, a[1])[SMS_TYPE]);
-    ext_warn_once(vm, WARN_SMS, "Gamelet.sendSms: no network, reporting the SMS as not sent");
+    int ok = smsv_send(vm, s.b);
     int cg = plat_class(vm, PC_GAMELET);
-    int32_t status = 0; /* Gamelet.<clinit>: SMS_SENT_UNSUCCESSFULLY = 0 */
-    if (cg >= 0 && vm->classes[cg].statics && vm->classes[cg].nstatics > GL_SMS_SENT_UNSUCCESSFULLY)
-        status = (int32_t)obj_slots(vm, vm->classes[cg].statics)[GL_SMS_SENT_UNSUCCESSFULLY];
+    /* Gamelet.<clinit>: SMS_SENT_UNSUCCESSFULLY (static slot 1) = 0, SUCCESSFULLY (2) = 1 */
+    int slot = ok ? GL_SMS_SENT_SUCCESSFULLY : GL_SMS_SENT_UNSUCCESSFULLY;
+    int32_t status = ok;
+    if (cg >= 0 && vm->classes[cg].statics && vm->classes[cg].nstatics > slot)
+        status = (int32_t)obj_slots(vm, vm->classes[cg].statics)[slot];
     vm->ext.sms_sent = 1;
     vm->ext.sms_status = status;
     return 0;
