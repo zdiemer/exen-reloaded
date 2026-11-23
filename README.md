@@ -4,8 +4,10 @@
 
 **Play In-Fusio ExEn mobile phone games on your PC, at full speed.**
 
-[![Release](https://img.shields.io/badge/release-v0.1.0-ff2d55?style=flat-square)](https://github.com/zdiemer/exen-reloaded/releases/latest)
-[![Games playable](https://img.shields.io/badge/games%20playable-47%20%2F%2047-ffb02e?style=flat-square)](https://github.com/zdiemer/exen-reloaded-compat)
+[![Release](https://img.shields.io/github/v/release/zdiemer/exen-reloaded?style=flat-square&label=release&color=ff2d55)](https://github.com/zdiemer/exen-reloaded/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/zdiemer/exen-reloaded/ci.yml?branch=main&style=flat-square&label=ci)](https://github.com/zdiemer/exen-reloaded/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/github/downloads/zdiemer/exen-reloaded/total?style=flat-square&color=ffb02e)](https://github.com/zdiemer/exen-reloaded/releases)
+[![Games playable](https://img.shields.io/badge/games%20playable-47%20%2F%2047-ff7a3d?style=flat-square)](https://github.com/zdiemer/exen-reloaded-compat)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-8d7f88?style=flat-square)](#download--run)
 [![libretro](https://img.shields.io/badge/libretro-core-8d7f88?style=flat-square)](docs/LIBRETRO.md)
 [![License](https://img.shields.io/badge/license-GPL--2.0-8d7f88?style=flat-square)](LICENSE)
