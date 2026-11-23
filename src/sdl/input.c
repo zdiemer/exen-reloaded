@@ -2,6 +2,7 @@
 #include "input.h"
 
 #include "exen.h"
+#include "paths.h"
 
 /* Bindable phone keys, in keypad order. The index is the slot in Input.held. */
 static const struct {
@@ -428,6 +429,94 @@ static void put_section(Buf *b, const Input *in, int pad)
         }
         put(b, "\n");
     }
+}
+
+void input_describe_source(int kind, int code, int dir, char *buf, size_t n)
+{
+    Buf b = {0};
+    InputBinding x = {kind, code, dir, 0};
+    put_input(&b, &x);
+    SDL_strlcpy(buf, b.s ? b.s : "", n);
+    SDL_free(b.s);
+}
+
+void input_describe(const Input *in, int code, int pad, char *buf, size_t n)
+{
+    Buf b = {0};
+    put(&b, "%s", "");
+    for (int i = 0; i < in->nbind; i++) {
+        const InputBinding *x = &in->bind[i];
+        if (x->phone != code || (x->kind != INPUT_KEY) != !!pad)
+            continue;
+        if (b.len)
+            put(&b, ", ");
+        put_input(&b, x);
+    }
+    SDL_strlcpy(buf, b.s ? b.s : "", n);
+    SDL_free(b.s);
+}
+
+int input_phone_at(int index)
+{
+    return index >= 0 && index < INPUT_NPHONE ? phone[index].code : 0;
+}
+
+const char *input_phone_label(int code)
+{
+    static const struct {
+        int code;
+        const char *label;
+    } labels[] = {
+        {'2', "2 (up)"},     {'4', "4 (left)"},          {'5', "5 (fire)"},
+        {'6', "6 (right)"},  {'8', "8 (down)"},          {'*', "* (star)"},
+        {'#', "# (pound)"},  {EXEN_KEY_OK, "OK (select)"}, {EXEN_KEY_CLEAR, "Clear (back)"},
+        {EXEN_KEY_PAD_UP, "Pad up"},     {EXEN_KEY_PAD_DOWN, "Pad down"},
+        {EXEN_KEY_PAD_LEFT, "Pad left"}, {EXEN_KEY_PAD_RIGHT, "Pad right"},
+    };
+    for (size_t i = 0; i < sizeof labels / sizeof *labels; i++)
+        if (labels[i].code == code)
+            return labels[i].label;
+    return input_phone_name(code);
+}
+
+int input_bind(Input *in, int kind, int code, int dir, int ph)
+{
+    if (phone_index(ph) < 0)
+        return 0;
+    input_release_all(in);
+    int n = in->nbind;
+    add_binding(in, kind, code, dir, ph, "controls");
+    return in->nbind > n;
+}
+
+void input_unbind(Input *in, int code, int pad)
+{
+    input_release_all(in);
+    int n = 0;
+    for (int i = 0; i < in->nbind; i++) {
+        const InputBinding *x = &in->bind[i];
+        if (x->phone == code && (x->kind != INPUT_KEY) == !!pad)
+            continue;
+        in->bind[n++] = *x;
+    }
+    in->nbind = n;
+}
+
+void input_reset_defaults(Input *in)
+{
+    input_release_all(in);
+    in->nbind = 0;
+    in->axis_press = 50 * 32767 / 100;
+    in->axis_release = 35 * 32767 / 100;
+    input_parse_config(in, default_config, "built-in controls");
+}
+
+int input_save_config(const Input *in, const char *path)
+{
+    char *text = input_format_config(in, 1);
+    int r = text ? exen_write_file(path, text, SDL_strlen(text)) : -1;
+    SDL_free(text);
+    return r;
 }
 
 char *input_format_config(const Input *in, int header)

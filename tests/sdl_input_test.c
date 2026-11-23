@@ -316,6 +316,58 @@ static void test_round_trip(void)
     SDL_free(text);
 }
 
+/* The editing calls behind the controls panel. */
+static void test_editing(void)
+{
+    Input in;
+    char buf[256];
+    input_init(&in, sink, NULL);
+    CHECK(input_phone_at(0) == '1' && input_phone_at(INPUT_NPHONE - 1) == EXEN_KEY_PAD_RIGHT);
+    CHECK(input_phone_at(INPUT_NPHONE) == 0 && input_phone_at(-1) == 0);
+    CHECK(!strcmp(input_phone_label('5'), "5 (fire)"));
+    CHECK(!strcmp(input_phone_label(EXEN_KEY_OK), "OK (select)"));
+    CHECK(!strcmp(input_phone_label('1'), "1"));
+    input_describe(&in, '2', 0, buf, sizeof buf);
+    CHECK(!strcmp(buf, "2, Up, Keypad 8, W"));
+    input_describe(&in, '2', 1, buf, sizeof buf);
+    CHECK(!strcmp(buf, "dpup, lefty-"));
+    input_describe(&in, EXEN_KEY_PAD_UP, 0, buf, sizeof buf);
+    CHECK(!strcmp(buf, ""));
+    input_describe_source(INPUT_BUTTON, SDL_GAMEPAD_BUTTON_SOUTH, 0, buf, sizeof buf);
+    CHECK(!strcmp(buf, "south"));
+    input_describe_source(INPUT_AXIS, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 1, buf, sizeof buf);
+    CHECK(!strcmp(buf, "righttrigger"));
+
+    /* binding releases what is held first, so no phone key stays down */
+    key(&in, SDLK_UP, 1, 0);
+    EXPECT("hold up", "+2");
+    CHECK(input_bind(&in, INPUT_KEY, SDLK_G, 0, '5'));
+    EXPECT("bind releases", "-2");
+    CHECK(!input_bind(&in, INPUT_KEY, SDLK_G, 0, '5')); /* already bound */
+    CHECK(!input_bind(&in, INPUT_KEY, SDLK_G, 0, 12345)); /* not a phone key */
+    key(&in, SDLK_UP, 0, 0);
+    EXPECT("old up release ignored", "");
+    key(&in, SDLK_G, 1, 0);
+    key(&in, SDLK_G, 0, 0);
+    EXPECT("new binding", "+5 -5");
+
+    /* clearing one device leaves the other */
+    input_unbind(&in, '5', 0);
+    input_describe(&in, '5', 0, buf, sizeof buf);
+    CHECK(!strcmp(buf, ""));
+    input_describe(&in, '5', 1, buf, sizeof buf);
+    CHECK(!strcmp(buf, "south"));
+    key(&in, SDLK_SPACE, 1, 0);
+    EXPECT("cleared", "");
+
+    input_reset_defaults(&in);
+    input_describe(&in, '5', 0, buf, sizeof buf);
+    CHECK(!strcmp(buf, "5, Keypad 5, Space"));
+    Input fresh;
+    input_init(&fresh, NULL, NULL);
+    CHECK(in.nbind == fresh.nbind && in.axis_press == fresh.axis_press);
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -327,6 +379,7 @@ int main(int argc, char **argv)
     test_hysteresis();
     test_config();
     test_round_trip();
+    test_editing();
     if (failures) {
         printf("sdl_input_test: %d failure(s)\n", failures);
         return 1;

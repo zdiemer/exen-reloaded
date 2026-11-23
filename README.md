@@ -65,46 +65,83 @@ rate, and has run every game it has been given so far.
 
 1. Download the archive for your system from the
    [Releases page](https://github.com/zdiemer/exen-reloaded/releases/latest) and unpack it.
-2. Run a game: `exen-reloaded game.exn` (on Windows you can also drag a `.exn` onto
-   `exen-reloaded.exe`).
+2. Start the app (double-click `exen-reloaded`) and choose **File ▸ Open…** (Ctrl+O), or drop a
+   `.exn` file on its window. On Windows you can also drag a `.exn` onto `exen-reloaded.exe`, and
+   `exen-reloaded game.exn` still works from a terminal.
 
 The archive contains the app, the headless runner `exen-run`, the libretro core (`libretro/`),
-In-Fusio's original simulator `gensimu.exe`, which exen-reloaded reads the ExEn framework
-from, and a General MIDI SoundFont (`soundfont/`) for the melodies (see [Sound](#sound)). Keep
-`gensimu.exe` (and the `flash/` and `soundfont/` folders) beside the app. No games are
-included; supply your own `.exn` files.
+and In-Fusio's original simulator `gensimu.exe`, which exen-reloaded reads the ExEn framework
+from, plus the General MIDI SoundFont in `soundfont/`. Keep `gensimu.exe`, `flash/` and
+`soundfont/` beside the app. No games are included; supply your own `.exn` files.
 
 Each game opens at the size of the handset it was made for (from a built-in database of known
-games, else 132x176).
+games, else 132x176); **Video ▸ Handset Screen** picks another size for one game.
 
-### Command-line options
+<div align="center">
+<img src="docs/img/app-menu.png" width="528" alt="exen-reloaded on Windows with the File menu and Open Recent open, Worms behind it"><br>
+<sub>The app on Windows: <b>File ▸ Open Recent</b> over Worms.</sub>
+</div>
 
-```
-exen-reloaded [options] game.exn
-  --scale N         window scale (default 4)
-  --size WxH        handset screen (default: from the game database)
-  --fullscreen      start fullscreen (F11 toggles)
-  --mute, --volume N
-  --voice V         melody voice: ringtone (default) or gm (General MIDI)
-  --soundfont PATH  General MIDI SoundFont, if not soundfont/TimGM6mb.sf2 beside the app
-  --sms MODE        server (default), delivered or offline; see SMS below
-  --keys-config PATH, --print-bindings
-  --sim PATH        gensimu.exe, if it is not beside the app
-```
+### Menus
+
+On Windows the menus are a normal menu bar (Alt or F10 opens it from the keyboard); on macOS
+they are in the menu bar at the top of the screen. On Linux, and in fullscreen on Windows, the
+same menus are a strip at the top of the window: press **F10** or tap **Alt** to show it, then
+use the mouse, the arrow keys and Enter, the underlined letters, or a gamepad's d-pad and A.
+The strip covers the top of the game without changing its scaling. While the strip or a panel
+is open the game is paused.
+
+| Menu | Items |
+|---|---|
+| **File** | Open…, Open Recent (the last 10 games), Reload, Close Game, Exit |
+| **Video** | Scale 1×-6×, Fullscreen, Handset Screen (Auto or one of the ExEn handset sizes, per game; the game restarts to use it), Screenshot (PNG in `screenshots/`) |
+| **State** | Quick Save, Quick Load, Current Slot (0-9, with when each was saved), Manage States… (a panel with a preview of each slot; load, save or delete) |
+| **Options** | Melody Voice (ring tone or General MIDI), Mute, Volume, SMS (mock server, delivered or offline; see [SMS](#sms)) |
+| **Input** | Controls… (a panel to remap the keyboard and gamepads), Gamepads (the connected ones) |
+| **Help** | Controls (the current bindings and hotkeys), About |
+
+Panels work with the mouse, the keyboard (arrows, Enter, Delete, Esc) or a gamepad (d-pad, A,
+B). The app remembers its settings (scale, fullscreen, sound, SMS mode, the recent games, the
+last folder and each game's handset screen) in `settings.ini`, beside `keys.ini`.
 
 ### Hotkeys
 
 | Action | Key |
 |---|---|
+| Open a game / reload it | Ctrl+O / Ctrl+R |
+| Controls panel (remap keys and gamepads) | F1 |
+| Save states panel | F4 |
 | Save state / load state | F5 / F8 |
 | Previous / next state slot (0-9) | F6 / F7 |
 | Mute | M |
 | Melody voice (ring tone / General MIDI) | V |
+| Show the menu strip (Linux; Windows in fullscreen) | F10 or Alt |
 | Fullscreen | F11 |
+| Screenshot | F12 |
+
+On macOS, Cmd works in place of Ctrl.
+
+### Command-line options
+
+```
+exen-reloaded [options] [game.exn]
+  --scale N         window scale (default 4, or the last one chosen in the Video menu)
+  --size WxH        handset screen for game.exn (default: from the game database)
+  --fullscreen      start fullscreen (F11 toggles)
+  --mute, --volume N
+  --voice V         melody voice: ringtone (default) or gm (General MIDI; "piano" also works)
+  --soundfont PATH  General MIDI SoundFont, if not soundfont/TimGM6mb.sf2 beside the app
+  --sms MODE        server (default), delivered or offline; see SMS below
+  --keys-config PATH, --print-bindings
+  --no-native-menu  use the in-window menu strip instead of the menu bar
+  --sim PATH        gensimu.exe, if it is not beside the app
+```
+
+Options override `settings.ini` for that run only.
 
 ## Controls
 
-The SDL3 frontend (`exen-reloaded game.exn`) maps the keyboard and any number of gamepads onto
+The app maps the keyboard and any number of gamepads onto
 the phone's keypad. Games were written for a phone: most move with 2/4/6/8 and fire or select
 with 5 or OK, and some use 1/3/7/9 for diagonals. The defaults keep the original simulator's
 keys (arrows = 2/4/6/8, numpad = keypad, Enter = OK, Esc = clear) and add the following:
@@ -120,11 +157,16 @@ keys (arrows = 2/4/6/8, numpad = keypad, Enter = OK, Esc = clear) and add the fo
 | OK / select (soft key, code -8) | Enter, numpad Enter | Start |
 | Clear / back (soft key, code -7) | Esc, Backspace | B (right face button), Back |
 
-The numpad follows the phone layout, so numpad 7 is phone 1. Hotkeys: M mutes, V switches the
-melody voice (see [Sound](#sound)), F11 toggles fullscreen, F5 / F8 save / load a state, F6 / F7 pick the state slot (0-9). Keys held on several devices at once count as one press. Auto-repeat is ignored, as
-in the original. Gamepads can be plugged in and out while a game runs.
+The numpad follows the phone layout, so numpad 7 is phone 1. The [hotkeys](#hotkeys) (M, V,
+F1-F12, ...) are not game keys. Keys held on several devices at once count as one press.
+Auto-repeat is ignored, as in the original. Gamepads can be plugged in and out while a game runs.
 
-To remap, edit `keys.ini`. It is written with the defaults on first run, beside the program, or
+To remap, open **Input ▸ Controls…** (F1): select a phone key's keyboard or gamepad cell, press
+Enter (or A, or click it), then press the new key or button, or move a stick or trigger; Delete
+clears the cell and *Reset to defaults* brings the built-in controls back. Changes are saved to
+`keys.ini` at once. **Help ▸ Controls** lists the bindings in effect.
+
+You can also edit `keys.ini` by hand. It is written with the defaults on first run, beside the program, or
 in the per-user data directory if the program's directory is not writable (for example
 `%APPDATA%\exen-reloaded\exen-reloaded\` on Windows or `~/.local/share/exen-reloaded/exen-reloaded/`
 on Linux). `--keys-config PATH` uses another file, and `--print-bindings` prints the controls
@@ -162,9 +204,11 @@ game saves, as the original writes `flash/EEPROM.DAT`. A game seen for the first
 the settings in the simulator's `flash/eeprom.dat` (nickname, currency, SMS prices) with an empty
 save record.
 
-Save states capture the whole machine. F5 saves to the current slot, F8 loads it, F6 / F7 select
-the slot; the window title shows what happened. Slots are files
-`states/<game>/slot0.exst` .. `slot9.exst`. A state belongs to one game file and one
+Save states capture the whole machine. F5 (**State ▸ Quick Save**) saves to the current slot,
+F8 loads it, F6 / F7 or **State ▸ Current Slot** select the slot; the window title shows what
+happened. **State ▸ Manage States…** (F4) lists the slots with the time each was saved and a
+preview of the screen, and loads, saves (F5) or deletes (Delete) the selected one. Slots are
+files `states/<game>/slot0.exst` .. `slot9.exst`, each with its preview in `slotN.thumb`. A state belongs to one game file and one
 `gensimu.exe`; loading one into anything else is refused. A state includes the EEPROM as it was
 when the state was saved, so loading an older state also brings back its saves.
 
@@ -197,16 +241,17 @@ voices:
   complete GM bank; any other GM SoundFont 2 file works too. Without a SoundFont the voice falls
   back to a procedural approximation of the GM piano, so it still sounds like a piano.
 
-The SDL frontend starts with `--voice ringtone` or `--voice gm` and switches with V while
-playing (the window title shows the voice for a moment); `--mute` / M and `--volume N` set the
-level. It loads the SoundFont from `--soundfont PATH`, else `soundfont/TimGM6mb.sf2` or
-`TimGM6mb.sf2` beside the app (in a source tree, `vendor/soundfont/`). The libretro core has the
-option "Melody voice" and reads `TimGM6mb.sf2` from the system directory. The switch crossfades
-over a few milliseconds and never changes the melody's timing. The voice is a player setting:
-save states do not store it. The SoundFont's sounding notes are in save states and restore
-exactly (rewind and run-ahead included) when the same SoundFont is loaded; with another
-SoundFont, or none, they restart at the current note. `exen-run --voice gm --wav out.wav
-game.exn` renders a game's audio with the GM voice (`--soundfont PATH` picks the SoundFont).
+The app switches voice in **Options ▸ Melody Voice** or with V while playing (the window title
+shows the voice for a moment), and starts with `--voice ringtone` or `--voice gm`;
+**Options ▸ Mute** / M, **Options ▸ Volume** and `--mute` / `--volume N` set the level. It loads
+the SoundFont from `--soundfont PATH`, else `soundfont/TimGM6mb.sf2` or `TimGM6mb.sf2` beside the
+app (in a source tree, `vendor/soundfont/`). The libretro core has the option "Melody voice" and
+reads `TimGM6mb.sf2` from the system directory. The switch crossfades over a few milliseconds
+and never changes the melody's timing. The voice is a player setting: save states do not store
+it. The SoundFont's sounding notes are in save states and restore exactly (rewind and run-ahead
+included) when the same SoundFont is loaded; with another SoundFont, or none, they restart at
+the current note. `exen-run --voice gm --wav out.wav game.exn` renders a game's audio with the
+GM voice (`--soundfont PATH` picks the SoundFont).
 
 ## SMS
 
@@ -224,15 +269,14 @@ In-Fusio PC tool. exen-reloaded mocks that server instead ([docs/re/SMS.md](docs
 - **offline**: reported as not sent, as with no network; games show their "problem when sending
   the SMS" screen.
 
-The SDL frontend takes `--sms server|delivered|offline` (and dates rankings with today's date),
-the libretro core has the option "SMS", and `exen-run --sms MODE --sms-log` prints the decoded
+The SDL frontend has **Options ▸ SMS** and `--sms server|delivered|offline` (and dates rankings
+with today's date), the libretro core has the option "SMS", and `exen-run --sms MODE --sms-log` prints the decoded
 traffic. The server's records and an answer in flight are part of save states; the mode is not.
 
 ## libretro core
 
 exen-reloaded also runs as a libretro core in RetroArch and other frontends. Copy `gensimu.exe`
-(and `flash/eeprom.dat`, and `TimGM6mb.sf2` for the General MIDI voice) into the frontend's
-system directory and load a `.exn`. It supports save
+(and `flash/eeprom.dat`) into the frontend's system directory and load a `.exn`. It supports save
 files (the phone's EEPROM), save states, rewind, run-ahead, and core options for the screen
 size, sound, melody voice and SMS. See [docs/LIBRETRO.md](docs/LIBRETRO.md).
 
@@ -278,7 +322,7 @@ build/exen-reloaded game.exn
 
 Needs CMake 3.20+ and a C11 compiler. SDL3 is used if installed, otherwise fetched and built.
 The core (`src/core/`) is plain C with no OS or SDL dependency; the frontends are `src/sdl/` (the
-app), `src/libretro/` and `src/cli/` (`exen-run`, the headless runner the harness uses).
+app; its menus are described in `src/sdl/menu.h`), `src/libretro/` and `src/cli/` (`exen-run`, the headless runner the harness uses).
 Contributor notes are in [`AGENTS.md`](AGENTS.md); work is tracked in
 [issues](https://github.com/zdiemer/exen-reloaded/issues).
 
@@ -289,10 +333,13 @@ preservation. It is not affiliated with In-Fusio. ExEn and the game titles are t
 their respective owners.
 
 exen-reloaded's own code is free software under the **GNU GPL v2** (see [`LICENSE`](LICENSE)).
-Two parts of the repository are not covered by it and keep their own terms:
+These parts of the repository are not covered by it and keep their own terms:
 
 - `vendor/gensimu/`: In-Fusio's original EXEN-V2 simulator, abandoned freeware, redistributed
   unmodified for preservation (see its [provenance note](vendor/gensimu/PROVENANCE.md)).
 - `src/libretro/libretro.h`: the libretro API header, under its own permissive licence.
+- `vendor/microui/`: [microui](https://github.com/rxi/microui) by rxi, MIT licence (see its
+  [provenance note](vendor/microui/PROVENANCE.md)), for the app's in-window menu and panels.
+- `src/sdl/font8x8.h`: the public-domain 8x8 font of Daniel Hepper's font8x8.
 
 No games are included.

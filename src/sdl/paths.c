@@ -37,3 +37,34 @@ const char *exen_data_dir(void)
     }
     return dir;
 }
+
+int exen_write_file(const char *path, const void *data, size_t len)
+{
+    char dir[1024], tmp[1100];
+    SDL_strlcpy(dir, path, sizeof dir);
+    char *cut = (char *)exen_path_basename(dir);
+    if (cut > dir) {
+        cut--;
+        *cut = 0;
+        SDL_CreateDirectory(dir); /* with any missing parents; fails harmlessly if it exists */
+    }
+    SDL_snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (!SDL_SaveFile(tmp, data, len)) {
+        SDL_Log("cannot write %s: %s", tmp, SDL_GetError());
+        return -1;
+    }
+    if (!SDL_RenamePath(tmp, path)) {
+        SDL_Log("cannot rename %s: %s", tmp, SDL_GetError());
+        SDL_RemovePath(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+const char *exen_path_basename(const char *path)
+{
+    const char *slash = SDL_strrchr(path, '/'), *bslash = SDL_strrchr(path, '\\');
+    if (bslash > slash)
+        slash = bslash;
+    return slash ? slash + 1 : path;
+}

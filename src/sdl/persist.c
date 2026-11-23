@@ -4,19 +4,17 @@
 #include "paths.h"
 
 #define STATUS_MS 2500
-#define NSLOTS 10
 
 static ExenVM *g_vm;
 static char g_key[80];      /* per-game file stem */
 static char g_eep[1024];    /* saves/<key>.eep */
 static int g_slot;
-static char g_status[96];
+static char g_status[128];
 static uint64_t g_status_until; /* SDL_GetTicksNS deadline, 0 = no status */
 
-static void status(const char *fmt, ...) SDL_PRINTF_VARARG_FUNC(1);
-static void status(const char *fmt, ...)
+void persist_status(const char *fmt, ...)
 {
-    char msg[80];
+    char msg[100];
     va_list ap;
     va_start(ap, fmt);
     SDL_vsnprintf(msg, sizeof msg, fmt, ap);
@@ -44,60 +42,34 @@ int persist_title_wait_ms(void)
     return (int)((g_status_until - now + 999999u) / 1000000u);
 }
 
-/* Write `len` bytes to `path` through a temporary file, creating the directory. */
-static int write_file(const char *path, const void *data, size_t len)
+static void slot_path(char *buf, size_t n, int slot, const char *ext)
 {
-    char dir[1024], tmp[1100];
-    SDL_strlcpy(dir, path, sizeof dir);
-    char *cut = SDL_strrchr(dir, '/'), *cut2 = SDL_strrchr(dir, '\\');
-    if (cut2 > cut)
-        cut = cut2;
-    if (cut) {
-        *cut = 0;
-        SDL_CreateDirectory(dir); /* with any missing parents; fails harmlessly if it exists */
-    }
-    SDL_snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    if (!SDL_SaveFile(tmp, data, len)) {
-        SDL_Log("cannot write %s: %s", tmp, SDL_GetError());
-        return -1;
-    }
-    if (!SDL_RenamePath(tmp, path)) {
-        SDL_Log("cannot rename %s: %s", tmp, SDL_GetError());
-        SDL_RemovePath(tmp);
-        return -1;
-    }
-    return 0;
+    SDL_snprintf(buf, n, "%sstates/%s/slot%d.%s", exen_data_dir(), g_key, slot, ext);
 }
 
-static void slot_path(char *buf, size_t n, int slot)
-{
-    SDL_snprintf(buf, n, "%sstates/%s/slot%d.exst", exen_data_dir(), g_key, slot);
-}
-
-/* The game's file stem: its database title made file-name safe, else its CRC-32. */
-static void make_key(const uint8_t *exn, size_t len)
+void persist_game_key(const uint8_t *exn, size_t len, char *out, size_t n)
 {
     ExenGameInfo gi;
     int m = exen_game_info(exn, len, &gi);
     size_t k = 0;
     if (m == EXEN_GAME_EXACT)
-        for (const char *s = gi.title; *s && k + 1 < sizeof g_key; s++) {
+        for (const char *s = gi.title; *s && k + 1 < n; s++) {
             char c = *s;
             int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
                      c == '-' || c == '_' || c == '.' || c == ' ';
-            g_key[k++] = ok ? c : '_';
+            out[k++] = ok ? c : '_';
         }
-    while (k && (g_key[k - 1] == ' ' || g_key[k - 1] == '.'))
+    while (k && (out[k - 1] == ' ' || out[k - 1] == '.'))
         k--; /* Windows drops trailing dots and spaces */
-    g_key[k] = 0;
-    if (!k || g_key[0] == '.')
-        SDL_snprintf(g_key, sizeof g_key, "%08x", (unsigned)SDL_crc32(0, exn, len));
+    out[k] = 0;
+    if (!k || out[0] == '.')
+        SDL_snprintf(out, n, "%08x", (unsigned)SDL_crc32(0, exn, len));
 }
 
 void persist_open(ExenVM *vm, const char *sim, const uint8_t *exn, size_t len)
 {
     g_vm = vm;
-    make_key(exn, len);
+    persist_game_key(exn, len, g_key, sizeof g_key);
     SDL_snprintf(g_eep, sizeof g_eep, "%ssaves/%s.eep", exen_data_dir(), g_key);
     size_t n = 0;
     void *img = SDL_LoadFile(g_eep, &n);
@@ -115,13 +87,7 @@ void persist_open(ExenVM *vm, const char *sim, const uint8_t *exn, size_t len)
     if (sim) {
         char dir[1024];
         SDL_strlcpy(dir, sim, sizeof dir);
-        char *cut = SDL_strrchr(dir, '/'), *cut2 = SDL_strrchr(dir, '\\');
-        if (cut2 > cut)
-            cut = cut2;
-        if (cut)
-            cut[1] = 0;
-        else
-            dir[0] = 0;
+        dir[exen_path_basename(dir) - dir] = 0;
         SDL_snprintf(path, sizeof path, "%sflash/eeprom.dat", dir);
     }
     void *def = path[0] ? SDL_LoadFile(path, &n) : NULL;
@@ -135,80 +101,157 @@ void persist_eeprom_changed(void *user)
 {
     (void)user;
     if (g_vm && g_eep[0])
-        write_file(g_eep, exen_eeprom(g_vm), EXEN_EEPROM_SIZE);
+        exen_write_file(g_eep, exen_eeprom(g_vm), EXEN_EEPROM_SIZE);
 }
 
 void persist_close(void)
 {
+    if (!g_vm)
+        return;
     persist_eeprom_changed(NULL);
     g_vm = NULL;
+    g_key[0] = 0;
+    g_eep[0] = 0;
 }
 
-static void save_slot(void)
+int persist_slot(void)
 {
-    if (exen_halted(g_vm)) {
-        status("slot %d: not saved, the game has stopped", g_slot);
+    return g_slot;
+}
+
+void persist_select_slot(int slot)
+{
+    g_slot = ((slot % PERSIST_NSLOTS) + PERSIST_NSLOTS) % PERSIST_NSLOTS;
+    if (!g_vm) {
+        persist_status("slot %d", g_slot);
         return;
+    }
+    PersistSlotInfo info;
+    persist_status("slot %d%s", g_slot, persist_slot_info(g_slot, &info) ? "" : " (empty)");
+}
+
+static void save_thumb(int slot, const uint8_t *px, int w, int h)
+{
+    char path[1200];
+    slot_path(path, sizeof path, slot, "thumb");
+    if (!px || w <= 0 || h <= 0 || w > 0xffff || h > 0xffff) {
+        SDL_RemovePath(path);
+        return;
+    }
+    size_t n = 8 + (size_t)w * (size_t)h;
+    uint8_t *b = SDL_malloc(n);
+    if (!b)
+        return;
+    SDL_memcpy(b, "EXTH", 4);
+    b[4] = (uint8_t)w;
+    b[5] = (uint8_t)(w >> 8);
+    b[6] = (uint8_t)h;
+    b[7] = (uint8_t)(h >> 8);
+    SDL_memcpy(b + 8, px, n - 8);
+    exen_write_file(path, b, n);
+    SDL_free(b);
+}
+
+int persist_save(int slot, const uint8_t *thumb, int w, int h)
+{
+    if (!g_vm)
+        return 0;
+    if (exen_halted(g_vm)) {
+        persist_status("slot %d: not saved, the game has stopped", slot);
+        return 0;
     }
     size_t n = exen_state_size(g_vm);
     void *b = n ? SDL_malloc(n) : NULL;
     int r = b ? exen_state_save(g_vm, b, n) : -1;
     char path[1200];
-    slot_path(path, sizeof path, g_slot);
-    if (r < 0)
-        status("slot %d: save failed", g_slot);
-    else if (write_file(path, b, (size_t)r) < 0)
-        status("slot %d: cannot write the file", g_slot);
-    else
-        status("slot %d: saved", g_slot);
-    if (r < 0)
+    slot_path(path, sizeof path, slot, "exst");
+    int ok = 0;
+    if (r < 0) {
+        persist_status("slot %d: save failed", slot);
         SDL_Log("save state: %s", exen_error(g_vm));
+    } else if (exen_write_file(path, b, (size_t)r) < 0) {
+        persist_status("slot %d: cannot write the file", slot);
+    } else {
+        save_thumb(slot, thumb, w, h);
+        persist_status("slot %d: saved", slot);
+        ok = 1;
+    }
     SDL_free(b);
+    return ok;
 }
 
-int persist_load_slot(void)
+int persist_load(int slot)
 {
+    if (!g_vm)
+        return 0;
     char path[1200];
-    slot_path(path, sizeof path, g_slot);
+    slot_path(path, sizeof path, slot, "exst");
     size_t n = 0;
     void *b = SDL_LoadFile(path, &n);
     if (!b) {
-        status("slot %d: empty", g_slot);
+        persist_status("slot %d: empty", slot);
         return 0;
     }
     int r = exen_state_load(g_vm, b, n);
     SDL_free(b);
     if (r < 0) {
         SDL_Log("%s: %s", path, exen_error(g_vm));
-        status("slot %d: cannot load (see log)", g_slot);
+        persist_status("slot %d: cannot load (see log)", slot);
         return 0;
     }
-    status("slot %d: loaded", g_slot);
+    persist_status("slot %d: loaded", slot);
     return 1;
 }
 
-int persist_hotkey(const SDL_Event *ev)
+int persist_delete(int slot)
 {
-    if (ev->type != SDL_EVENT_KEY_DOWN && ev->type != SDL_EVENT_KEY_UP)
-        return PERSIST_NONE;
-    SDL_Keycode k = ev->key.key;
-    if (k != SDLK_F5 && k != SDLK_F6 && k != SDLK_F7 && k != SDLK_F8)
-        return PERSIST_NONE;
-    if (ev->type != SDL_EVENT_KEY_DOWN || ev->key.repeat || !g_vm)
-        return PERSIST_HANDLED; /* ours, nothing to do */
-    switch (k) {
-    case SDLK_F5:
-        save_slot();
-        return PERSIST_HANDLED;
-    case SDLK_F6:
-    case SDLK_F7: {
-        g_slot = (g_slot + (k == SDLK_F7 ? 1 : NSLOTS - 1)) % NSLOTS;
-        char path[1200];
-        slot_path(path, sizeof path, g_slot);
-        status("slot %d%s", g_slot, SDL_GetPathInfo(path, NULL) ? "" : " (empty)");
-        return PERSIST_HANDLED;
+    if (!g_vm)
+        return 0;
+    char path[1200];
+    slot_path(path, sizeof path, slot, "thumb");
+    SDL_RemovePath(path);
+    slot_path(path, sizeof path, slot, "exst");
+    int had = SDL_GetPathInfo(path, NULL);
+    if (had && !SDL_RemovePath(path)) {
+        persist_status("slot %d: cannot delete", slot);
+        return 0;
     }
-    default:
-        return PERSIST_LOADING;
+    persist_status("slot %d: %s", slot, had ? "deleted" : "empty");
+    return had;
+}
+
+int persist_slot_info(int slot, PersistSlotInfo *info)
+{
+    SDL_zerop(info);
+    if (!g_vm)
+        return 0;
+    char path[1200];
+    slot_path(path, sizeof path, slot, "exst");
+    SDL_PathInfo pi;
+    if (SDL_GetPathInfo(path, &pi) && pi.type == SDL_PATHTYPE_FILE) {
+        info->exists = 1;
+        info->mtime = pi.modify_time;
     }
+    return info->exists;
+}
+
+uint8_t *persist_load_thumb(int slot, int *w, int *h)
+{
+    if (!g_vm)
+        return NULL;
+    char path[1200];
+    slot_path(path, sizeof path, slot, "thumb");
+    size_t n = 0;
+    uint8_t *b = SDL_LoadFile(path, &n);
+    if (!b)
+        return NULL;
+    int tw = n >= 8 ? b[4] | b[5] << 8 : 0, th = n >= 8 ? b[6] | b[7] << 8 : 0;
+    if (n < 8 || SDL_memcmp(b, "EXTH", 4) || !tw || !th || n != 8 + (size_t)tw * (size_t)th) {
+        SDL_free(b);
+        return NULL;
+    }
+    SDL_memmove(b, b + 8, n - 8);
+    *w = tw;
+    *h = th;
+    return b;
 }
