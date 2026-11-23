@@ -4,7 +4,7 @@ authors = "exen-reloaded contributors"
 supported_extensions = "exn"
 corename = "exen-reloaded"
 categories = "Emulator"
-license = "See the project repository"
+license = "GPLv2"
 permissions = ""
 display_version = "0.1.0-dev"
 

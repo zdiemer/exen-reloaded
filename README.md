@@ -139,3 +139,12 @@ run-ahead, core options for the screen size and sound, and the same pad layout a
 exen-reloaded is an independent reimplementation written for interoperability and game
 preservation. It is not affiliated with In-Fusio. ExEn and the game titles are trademarks of
 their respective owners.
+
+exen-reloaded's own code is free software under the **GNU GPL v2** (see [`LICENSE`](LICENSE)).
+Two parts of the repository are not covered by it and keep their own terms:
+
+- `vendor/gensimu/`: In-Fusio's original EXEN-V2 simulator, abandoned freeware, redistributed
+  unmodified for preservation (see its [provenance note](vendor/gensimu/PROVENANCE.md)).
+- `src/libretro/libretro.h`: the libretro API header, under its own permissive licence.
+
+No games are included.
