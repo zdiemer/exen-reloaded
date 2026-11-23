@@ -70,8 +70,8 @@ keys (arrows = 2/4/6/8, numpad = keypad, Enter = OK, Esc = clear) and add the fo
 | OK / select (soft key, code -8) | Enter, numpad Enter | Start |
 | Clear / back (soft key, code -7) | Esc, Backspace | B (right face button), Back |
 
-The numpad follows the phone layout, so numpad 7 is phone 1. Hotkeys: M mutes, F11 toggles
-fullscreen, F5 / F8 save / load a state, F6 / F7 pick the state slot (0-9). Keys held on several devices at once count as one press. Auto-repeat is ignored, as
+The numpad follows the phone layout, so numpad 7 is phone 1. Hotkeys: M mutes, V switches the
+melody voice (see [Sound](#sound)), F11 toggles fullscreen, F5 / F8 save / load a state, F6 / F7 pick the state slot (0-9). Keys held on several devices at once count as one press. Auto-repeat is ignored, as
 in the original. Gamepads can be plugged in and out while a game runs.
 
 To remap, edit `keys.ini`. It is written with the defaults on first run, beside the program, or
@@ -103,6 +103,25 @@ stick and trigger directions are `leftx-`, `lefty+`, `righttrigger` and so on, a
 `stick-press` / `stick-release` are the percentages of travel that press and release a key.
 A section in the file replaces the defaults for that device; a missing section keeps them.
 Invalid entries are logged and skipped. The file's header comment lists every name.
+
+## Sound
+
+Games play monophonic melodies (`Gamelet.playMelody`), which the core sequences exactly as the
+original simulator did and synthesises itself, so every frontend sounds the same. There are two
+voices:
+
+- **Ring tone** (default): a band-limited square wave, close to what a 2003 handset played.
+- **Piano**: what the original simulator sounded like. It sent the notes to Windows' General
+  MIDI synth, whose default instrument is the acoustic grand piano; this voice approximates it
+  procedurally (no sample files), with the piano's bright attack, decaying overtones and a short
+  release between legato notes.
+
+The SDL frontend starts with `--voice ringtone` or `--voice piano` and switches with V while
+playing (the window title shows the voice for a moment); `--mute` / M and `--volume N` set the
+level. The libretro core has the option "Melody voice". The switch crossfades over a few
+milliseconds and never changes the melody's timing. The voice is a player setting: save states
+do not store it. `exen-run --voice piano --wav out.wav game.exn` renders a game's audio with
+either voice.
 
 ## Saves and save states
 

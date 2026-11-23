@@ -78,6 +78,7 @@ button after its phone key.
 |---|---|---|
 | Screen size (`exen_screen_size`) | Auto, 101x80, 112x112, 120x143, 128x128, 128x141, 128x160, 132x176 | The handset screen the game runs on. Auto takes it from the built-in game database, or 132x176 (the simulator's default handset) for games it does not know. Takes effect when the game is restarted (Restart / `retro_reset`, or the next load); the core then updates the frontend's geometry. |
 | Sound (`exen_audio`) | enabled, disabled | Disabled mutes the output. The melodies keep running silently, so they are in time when sound comes back. Takes effect at once. |
+| Melody voice (`exen_melody_voice`) | Ring tone (`ringtone`), Piano (like the 2003 simulator) (`piano`) | Ring tone is a band-limited square wave, close to a 2003 handset. Piano approximates what the original simulator played: it sent the notes to Windows' General MIDI synth, whose default instrument is the acoustic grand piano (see README.md, Sound). Takes effect at once, with a short crossfade; the melodies keep their timing. Save states do not store the voice. |
 
 The options use the v2 interface, falling back to v1 or plain variables on older frontends.
 

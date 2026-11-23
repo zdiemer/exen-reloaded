@@ -887,11 +887,25 @@ common, and Arthur & Les Pirates, Flynn and XMasTales call playMelody over 200 t
 **exen-reloaded** (`src/core/melody.c`): the sequencer is a port of the timer proc running on the
 audio sample clock (an event at `t` ms lands on sample `ceil(t * rate / 1000)` from the start), with
 the deviations noted above (stop at the array end; release the old note on restart). The core
-synthesizes the notes itself instead of using MIDI: a PolyBLEP square wave, 3 ms attack, decay to
-60 % over about 250 ms, 12 ms release, a one-pole low-pass, and the 0x84/0x85 levels as L/R gains. Channel 9
-plays noise bursts. The original's MIDI timbre would be GM piano (program 0), but a square voice is
-closer to a 2003 handset. The EEPROM sound byte is **not** honoured, because the shipped EEPROM would
-silence every game; hosts mute with `exen_audio_set_volume`.
+synthesizes the notes itself instead of using MIDI, with two host-selectable voices
+(`exen_audio_set_voice`):
+- `EXEN_VOICE_RINGTONE` (default): a PolyBLEP square wave, 3 ms attack, decay to 60 % over about
+  250 ms, 12 ms release, a one-pole low-pass. Closer to a 2003 handset than the simulator was.
+- `EXEN_VOICE_PIANO`: an approximation of what the simulator actually played. Its notes went to the
+  default MIDI device, on Windows the Microsoft GS Wavetable synth, whose program 0 is the acoustic
+  grand piano, at velocity 64. The voice is procedural (no samples): up to 16 slightly inharmonic
+  partials on two detuned strings each, struck-string partial levels, a two-stage decay that is
+  faster for higher partials, a hammer-noise transient, and on note-off a 40-120 ms damper release,
+  so the player's legato note changes (note-off right before the next note-on) overlap briefly as
+  on the MIDI synth. Program changes (0x81) are tracked but every program plays the piano (no game
+  in the corpus sends one).
+
+Both voice pools receive every note event and always run; the setting only selects (with a 30 ms
+crossfade) what is heard, so switching mid-melody never affects the sequencer. The voice is a host
+setting and is not in save states; the piano pool's state is (optional `PIAN` chunk). The 0x84/0x85
+levels are the L/R gains of both voices. Channel 9 plays noise bursts in either voice. The EEPROM
+sound byte is **not** honoured, because the shipped EEPROM would silence every game; hosts mute with
+`exen_audio_set_volume`.
 
 ---
 

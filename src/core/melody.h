@@ -3,8 +3,12 @@
  * The sequencer reproduces the original simulator's player (gensimu.exe 0x43b192 / 0x43ad57,
  * docs/re/NATIVES.md §3.2, docs/re/natives/melody.c.txt): one MIDI-style note stream of
  * (note, duration) byte pairs, timed by a periodic timer that each event re-arms. Instead of
- * sending MIDI, the core renders the notes itself with a small band-limited square-wave voice,
- * so every frontend produces the same audio.
+ * sending MIDI, the core renders the notes itself, so every frontend produces the same audio.
+ * There are two voices (exen_audio_set_voice): a band-limited square "ring tone" (the default,
+ * close to a 2003 handset) and a procedural piano approximating the General MIDI grand piano
+ * the original simulator played through Windows' synth. Every note event goes to both voice
+ * pools, which always run; the host setting only picks (and crossfades) what is heard, so
+ * switching never touches the timing.
  *
  * All timing runs on the audio clock: the sequencer only advances while the host renders
  * samples (exen_audio_render). The state is plain data (the melody bytes are copied in, no
@@ -18,6 +22,10 @@
 /* Longest melody kept, in bytes. The longest in the corpus is 224; longer arrays are cut. */
 #define MELODY_MAX 4096
 #define MELODY_VOICES 3
+/* Piano voice: a monophonic melody needs the sounding note plus the release tails of the
+ * last few (legato note changes overlap like on a MIDI synth). Partials per note, at most. */
+#define PIANO_VOICES 4
+#define PIANO_PARTIALS 16
 
 typedef struct MelodyVoice {
     uint8_t state;          /* 0 free, 1 attack, 2 sustain/decay, 3 release */
@@ -27,6 +35,21 @@ typedef struct MelodyVoice {
     uint32_t noise;         /* drum LFSR */
     float lp;               /* drum noise filter state */
 } MelodyVoice;
+
+/* One piano note: additive partials, each struck on two slightly detuned strings. Coefficients
+ * (frequencies, decay rates) are derived from the note and the output rate when rendering, so
+ * the state holds only levels and phases. */
+typedef struct PianoVoice {
+    uint8_t state;          /* 0 free, 1 key down, 2 released (damper on) */
+    uint8_t note, ch, pad;
+    float att;              /* attack ramp 0..1 */
+    float ph[PIANO_PARTIALS][2];  /* string phases, in cycles */
+    float e1[PIANO_PARTIALS];     /* partial level, prompt-sound component (fast decay) */
+    float e2[PIANO_PARTIALS];     /* partial level, aftersound component (slow decay) */
+    uint32_t noise;         /* hammer noise LFSR */
+    float ne;               /* hammer noise level */
+    float n1, n2;           /* hammer noise band-pass state */
+} PianoVoice;
 
 typedef struct Melody {
     /* sequencer state, mirroring the globals of the original player */
@@ -46,11 +69,14 @@ typedef struct Melody {
     /* synthesizer */
     MelodyVoice voice[MELODY_VOICES];
     float gain_l, gain_r;   /* smoothed output gains */
-    float lp_l, lp_r;       /* output low-pass state */
+    float lp_l, lp_r;       /* output low-pass state (ring-tone voice and drums) */
+    PianoVoice piano[PIANO_VOICES];
 
     /* host settings (not game state) */
     int32_t rate;           /* output sample rate, Hz */
     int32_t volume;         /* 0..100 */
+    int32_t timbre;         /* EXEN_VOICE_*: which voice is heard */
+    float mix;              /* 0 ring tone .. 1 piano, glides towards `timbre` */
     uint32_t melodies;      /* melodies started (diagnostics) */
 } Melody;
 

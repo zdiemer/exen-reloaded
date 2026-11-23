@@ -108,6 +108,15 @@ int exen_audio_active(ExenVM *vm);
  * Muting keeps the sequencer running, so melodies stay in time. */
 void exen_audio_set_volume(ExenVM *vm, int volume);
 int exen_audio_rate(ExenVM *vm);
+/* Melody voice, a host setting like the volume (save states neither store nor change it).
+ * RINGTONE (the default) is a band-limited square wave, close to a 2003 handset. PIANO
+ * approximates what the original simulator played: it sent the notes to Windows' General MIDI
+ * synth, whose default program is the acoustic grand piano. Both voices follow the same
+ * sequencer, and a switch crossfades over a few ms, so it can be made at any time, mid-note,
+ * without a click or any change in timing. Unknown values select RINGTONE. */
+enum { EXEN_VOICE_RINGTONE = 0, EXEN_VOICE_PIANO = 1 };
+void exen_audio_set_voice(ExenVM *vm, int voice);
+int exen_audio_voice(ExenVM *vm);
 
 /* Persistent storage: the 2048-byte EEPROM image the original keeps in flash/eeprom.dat
  * (layout in docs/re/NATIVES.md §3.1). The config area (network settings, nickname, currency,
@@ -142,8 +151,8 @@ void exen_eeprom_reset(ExenVM *vm, const uint8_t *defaults, size_t len);
  * the state (len larger than the state) are ignored, so a frontend may append its own data.
  * On load the core restores its clock (getTimerTickCount continues from the saved value,
  * whatever the host's ticks_ms returns), calls set_timer with the restored period, present
- * with the restored screen, and eeprom_changed. Host settings are kept: audio volume, and the
- * output rate (sequencer timing is converted if the rate differs). */
+ * with the restored screen, and eeprom_changed. Host settings are kept: audio volume and voice,
+ * and the output rate (sequencer timing is converted if the rate differs). */
 size_t exen_state_size(ExenVM *vm);
 /* An upper bound on exen_state_size for every state this VM can ever produce, given the loaded
  * game: it depends only on the configuration and the loaded classes, so it stays constant for
